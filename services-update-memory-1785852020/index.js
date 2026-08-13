@@ -1,17 +1,53 @@
 const { createClient } = require('@supabase/supabase-js');
+const jwt = require('jsonwebtoken');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
-// O Cloud Run mantém isso em memória em execuções contínuas, 
+// O Cloud Run mantém isso em memória em execuções contínuas,
 // economizando centenas de milissegundos por requisição.
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
+
+// =================================================================
+// AUTENTICACAO: chamadas vindas do app (usuario logado, real ou anonimo)
+// Valida o JWT do Supabase enviado pelo app no header Authorization.
+// =================================================================
+function verifySupabaseAuth(req) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+  if (!token) return null;
+
+  try {
+    const payload = jwt.verify(token, process.env.SUPABASE_JWT_SECRET, {
+      algorithms: ['HS256'],
+    });
+    if (payload.role !== 'authenticated') return null;
+    return payload; // payload.sub = id do usuario (auth.uid())
+  } catch (err) {
+    return null;
+  }
+}
+
+// =================================================================
+// AUTENTICACAO: chamadas vindas do Webhook do Supabase (servidor-a-servidor)
+// Confere um segredo compartilhado enviado como header pelo proprio Webhook,
+// configurado em Database > Webhooks > HTTP Headers no painel do Supabase.
+// =================================================================
+function verifyWebhookSecret(req) {
+  const provided = req.headers['x-webhook-secret'];
+  const expected = process.env.SUPABASE_WEBHOOK_SECRET;
+  return !!expected && provided === expected;
+}
 
 exports.generateTrip = async (req, res) => {
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
 
   try {
+    if (!verifyWebhookSecret(req)) {
+      return res.status(401).json({ error: 'Chamada nao autorizada.' });
+    }
+
     const tripRecord = req.body.record;
 
     if (!tripRecord || !tripRecord.id) {
@@ -65,9 +101,9 @@ exports.generateTrip = async (req, res) => {
     // 2. Extração e limpeza do JSON gerado
     const rawText = geminiData.candidates[0].content.parts[0].text;
     const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-    
+
     // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
-    const tripJsonObject = JSON.parse(cleanText); 
+    const tripJsonObject = JSON.parse(cleanText);
 
     const tripTitle = tripJsonObject.trip_title || 'Viagem Personalizada';
     const budgetActual = tripJsonObject.estimated_cost_brl;
@@ -75,7 +111,7 @@ exports.generateTrip = async (req, res) => {
     // 3. Sucesso: Atualiza os dados no Supabase para 'ready'
     const { error: updateError } = await supabase
       .from('trips')
-      .update({ 
+      .update({
         itinerary_json: tripJsonObject,
         title: tripTitle,
         status: 'ready',
@@ -96,14 +132,14 @@ exports.generateTrip = async (req, res) => {
       try {
         await supabase
           .from('trips')
-          .update({ 
+          .update({
             status: 'failed',
             error_log: error.message
-            // Opcional: Se você criar uma coluna 'error_detail' no Supabase, 
+            // Opcional: Se você criar uma coluna 'error_detail' no Supabase,
             // pode salvar error.message lá para ajudar a debugar depois.
           })
           .eq('id', tripId);
-        
+
         console.log(`Status da trip ${tripId} revertido para 'failed' com sucesso.`);
       } catch (dbError) {
         console.error(`Falha catastrófica ao tentar atualizar a trip ${tripId} para failed:`, dbError);
@@ -123,11 +159,17 @@ exports.searchPlaces = async (req, res) => {
   // 1. A MÁGICA DO CORS: Isso avisa ao navegador Web que ele pode confiar nesta API
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   // Responde rápido se for apenas a verificação de segurança do navegador (Preflight)
   if (req.method === 'OPTIONS') {
     return res.status(204).send('');
+  }
+
+  // Usado tambem no funil pre-cadastro (antes de existir sessao) -- por isso
+  // o token e opcional aqui, mas quando vier, precisa ser valido.
+  if (req.headers.authorization && !verifySupabaseAuth(req)) {
+    return res.status(401).json({ error: 'Token de autenticação inválido.' });
   }
 
   // 2. Pega o que o FlutterFlow enviou na URL
@@ -139,14 +181,14 @@ exports.searchPlaces = async (req, res) => {
   }
 
   // 3. Monta a URL do Google usando a chave que já está nas suas variáveis
-  const apiKey = process.env.GOOGLE_MAPS_KEY; 
+  const apiKey = process.env.GOOGLE_MAPS_KEY;
   const googleUrl = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(input)}&types=(cities)&language=${lang}&key=${apiKey}`;
 
   // 4. Chama o Google e devolve para o FlutterFlow
   try {
     const response = await fetch(googleUrl);
     const data = await response.json();
-    
+
     if (data.status === 'OK') {
       return res.status(200).json(data.predictions);
     } else {
@@ -166,6 +208,10 @@ exports.generateBrainstorming = async (req, res) => {
   let sessionId = null;
 
   try {
+    if (!verifyWebhookSecret(req)) {
+      return res.status(401).json({ error: 'Chamada nao autorizada.' });
+    }
+
     const sessionRecord = req.body.record;
 
     if (!sessionRecord || !sessionRecord.id) {
@@ -176,7 +222,7 @@ exports.generateBrainstorming = async (req, res) => {
 
     // =================================================================
     // A NOSSA TRAVA CONTRA LOOP INFINITO (FAIL-FAST ATUALIZADO)
-    // Agora aceitamos 3 status: 
+    // Agora aceitamos 3 status:
     // - generating (fluxo novo)
     // - failed (usuário clicou em tentar novamente após erro)
     // - refused (usuário deu "não gostei" nas 3 opções e quer novas)
@@ -210,7 +256,7 @@ exports.generateBrainstorming = async (req, res) => {
     }
 
     // 1. Chama a API do Gemini Pro
-    // CTO Tip: Removi o "thinkingConfig" aqui e baixei os tokens. 
+    // CTO Tip: Removi o "thinkingConfig" aqui e baixei os tokens.
     // O Brainstorming é topo de funil, precisamos de velocidade (latência baixa) e JSON pequeno.
     const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
@@ -244,9 +290,9 @@ exports.generateBrainstorming = async (req, res) => {
     // 2. Extração e limpeza do JSON gerado
     const rawText = geminiData.candidates[0].content.parts[0].text;
     const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-    
+
     // Converte para Objeto (Falha e cai pro catch se o JSON for inválido)
-    const brainstormJsonObject = JSON.parse(cleanText); 
+    const brainstormJsonObject = JSON.parse(cleanText);
 
     // Validação extra para garantir que o Gemini retornou a chave certa
     if (!brainstormJsonObject.destinations || !Array.isArray(brainstormJsonObject.destinations)) {
@@ -256,7 +302,7 @@ exports.generateBrainstorming = async (req, res) => {
     // 3. Sucesso: Atualiza os dados na tabela do Supabase (AQUI USAMOS O NOME DA SUA TABELA)
     const { error: updateError } = await supabase
       .from('brainstorming') // <-- CERTIFIQUE-SE DE CRIAR ESTA TABELA NO SUPABASE
-      .update({ 
+      .update({
         ai_suggestions: brainstormJsonObject,
         status: 'ready',
         tokens_used: tokenCount
@@ -275,12 +321,12 @@ exports.generateBrainstorming = async (req, res) => {
       try {
         await supabase
           .from('brainstorming')
-          .update({ 
+          .update({
             status: 'failed',
             error_log: error.message
           })
           .eq('id', sessionId);
-        
+
         console.log(`Status do Brainstorming ${sessionId} revertido para 'failed' com sucesso.`);
       } catch (dbError) {
         console.error(`Falha catastrófica ao tentar atualizar o Brainstorming ${sessionId} para failed:`, dbError);
@@ -297,10 +343,15 @@ exports.generateBrainstorming = async (req, res) => {
 exports.generateMicroActivity = async (req, res) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     return res.status(204).send('');
+  }
+
+  // So chamado de dentro do app, com uma viagem ja salva -- sempre ha sessao.
+  if (!verifySupabaseAuth(req)) {
+    return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
   try {
@@ -319,7 +370,7 @@ exports.generateMicroActivity = async (req, res) => {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         generationConfig: {
-          maxOutputTokens: 4096, 
+          maxOutputTokens: 4096,
         }
       })
     });
@@ -337,8 +388,8 @@ exports.generateMicroActivity = async (req, res) => {
 
     const rawText = geminiData.candidates[0].content.parts[0].text;
     const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-    
-    const jsonObject = JSON.parse(cleanText); 
+
+    const jsonObject = JSON.parse(cleanText);
 
     let tokenCount = 0;
     if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
@@ -362,10 +413,15 @@ exports.updateTravelerMemory = async (req, res) => {
   // 1. A MÁGICA DO CORS: Permite chamadas diretas do FlutterFlow Web/App
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.set('Access-Control-Allow-Headers', 'Content-Type');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     return res.status(204).send('');
+  }
+
+  const authPayload = verifySupabaseAuth(req);
+  if (!authPayload) {
+    return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
   try {
@@ -373,6 +429,12 @@ exports.updateTravelerMemory = async (req, res) => {
 
     if (!user_id || !action_type || !old_activity) {
       return res.status(400).json({ error: 'Faltam parâmetros obrigatórios (user_id, action_type, old_activity).' });
+    }
+
+    // So pode mexer na propria memoria -- mesmo com a service role key,
+    // ninguem deve conseguir sobrescrever o travel_dna de outra pessoa.
+    if (authPayload.sub !== user_id) {
+      return res.status(403).json({ error: 'Não é possível atualizar a memória de outro usuário.' });
     }
 
     console.log(`[TravelerMemory] Processando ação '${action_type}' para o usuário ${user_id}...`);
@@ -422,7 +484,7 @@ exports.updateTravelerMemory = async (req, res) => {
     // 3. Extração e limpeza do JSON gerado
     const rawText = geminiData.candidates[0].content.parts[0].text;
     const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-    
+
     // Converte para Objeto (Falha e cai pro catch se o JSON for inválido)
     const newTags = JSON.parse(cleanText);
 
@@ -433,7 +495,7 @@ exports.updateTravelerMemory = async (req, res) => {
     // =================================================================
     // O MERGE INTELIGENTE NO SUPABASE
     // =================================================================
-    
+
     // Busca o DNA atual
     const { data: userData, error: fetchError } = await supabase
       .from('users') // <-- Confirme se sua tabela é 'users' ou 'profiles'
@@ -472,8 +534,8 @@ exports.updateTravelerMemory = async (req, res) => {
 
     console.log(`[TravelerMemory] Memória atualizada com sucesso para ${user_id}. Tokens usados: ${tokenCount}`);
 
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
       message: 'Memória atualizada e mesclada com sucesso',
       updated_dna: currentDna
     });
