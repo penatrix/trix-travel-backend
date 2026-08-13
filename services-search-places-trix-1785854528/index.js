@@ -167,8 +167,13 @@ exports.searchPlaces = async (req, res) => {
   }
 
   // Usado tambem no funil pre-cadastro (antes de existir sessao) -- por isso
-  // o token e opcional aqui, mas quando vier, precisa ser valido.
-  if (req.headers.authorization && !verifySupabaseAuth(req)) {
+  // o token e opcional aqui, mas quando vier (e nao for so "Bearer " vazio,
+  // caso o FlutterFlow sempre inclua o cabecalho), precisa ser valido.
+  const rawAuthHeader = req.headers.authorization || '';
+  const providedToken = rawAuthHeader.startsWith('Bearer ')
+    ? rawAuthHeader.slice(7).trim()
+    : '';
+  if (providedToken && !verifySupabaseAuth(req)) {
     return res.status(401).json({ error: 'Token de autenticação inválido.' });
   }
 
