@@ -66,6 +66,36 @@ exports.generateTrip = async (req, res) => {
     tripId = tripRecord.id;
     const promptText = tripRecord.prompt_payload;
 
+    // =================================================================
+    // P1.2: TRAVA DO PLANO GRATUITO
+    // Checa ANTES de chamar o Gemini (evita gastar tokens à toa). O app já
+    // faz essa mesma checagem no cliente antes de criar a linha - isso
+    // aqui é a trava de verdade, servidor nunca confia só no cliente.
+    // exclude_trip_id evita que a própria linha sendo processada conte
+    // contra a cota dela mesma.
+    // =================================================================
+    const { data: canGenerate, error: entitlementError } = await supabase.rpc('can_generate_trip', {
+      p_user_id: tripRecord.user_id,
+      p_exclude_trip_id: tripId,
+    });
+
+    if (entitlementError) {
+      throw new Error(`Falha ao checar direito de geração: ${entitlementError.message}`);
+    }
+
+    if (!canGenerate) {
+      await supabase
+        .from('trips')
+        .update({
+          status: 'failed',
+          error_log: 'QUOTA_EXCEEDED: Limite gratuito mensal atingido.',
+        })
+        .eq('id', tripId);
+
+      console.log(`[Quota] Trip ${tripId} bloqueada: usuário ${tripRecord.user_id} sem cota gratuita nem crédito.`);
+      return res.status(200).json({ success: true, message: 'Bloqueado por limite do plano gratuito' });
+    }
+
     // 1. Chama a API do Gemini Pro com Thinking MEDIUM
     const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
