@@ -1,0 +1,47 @@
+# Constrói E implanta.
+#
+# O gatilho anterior era do tipo "Buildpacks", que só faz o BUILD: a imagem
+# ia parar no registry, mas nenhuma revisão nova subia no Cloud Run. Por isso
+# o serviço ficou dias servindo código antigo com todos os builds verdes.
+#
+# ATENÇÃO antes de ativar: confira _SERVICE_NAME e _REGION abaixo contra o
+# que está no Cloud Run. O passo de deploy usa `services update`, que FALHA
+# se o serviço não existir com esse nome/região - de propósito, pra errar
+# alto em vez de criar um serviço duplicado silenciosamente.
+
+substitutions:
+  _SERVICE_NAME: generate-trip-trix
+  _REGION: us-central1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA
+      - --region=${_REGION}
+
+images:
+  - gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
