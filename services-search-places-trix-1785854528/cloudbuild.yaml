@@ -4,6 +4,11 @@
 # ia parar no registry, mas nenhuma revisão nova subia no Cloud Run. Por isso
 # o serviço ficou dias servindo código antigo com todos os builds verdes.
 #
+# O `dir:` no passo de build é obrigatório: no modo "arquivo de
+# configuração", os passos rodam a partir da RAIZ do repositório, não da
+# pasta do serviço (diferente do modo Buildpacks, que tinha o campo
+# "diretório de compilação" no próprio gatilho).
+#
 # ATENÇÃO antes de ativar: confira _SERVICE_NAME e _REGION abaixo contra o
 # que está no Cloud Run. O passo de deploy usa `services update`, que FALHA
 # se o serviço não existir com esse nome/região - de propósito, pra errar
@@ -16,6 +21,7 @@ substitutions:
 steps:
   - id: build
     name: gcr.io/k8s-skaffold/pack
+    dir: services-search-places-trix-1785854528
     entrypoint: pack
     args:
       - build
