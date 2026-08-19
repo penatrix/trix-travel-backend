@@ -9,14 +9,15 @@
 # pasta do serviço (diferente do modo Buildpacks, que tinha o campo
 # "diretório de compilação" no próprio gatilho).
 #
-# ATENÇÃO antes de ativar: confira _SERVICE_NAME e _REGION abaixo contra o
-# que está no Cloud Run. O passo de deploy usa `services update`, que FALHA
-# se o serviço não existir com esse nome/região - de propósito, pra errar
-# alto em vez de criar um serviço duplicado silenciosamente.
+# _SERVICE_NAME e _REGION abaixo foram confirmados contra o Cloud Run
+# (`gcloud run services list`) em 19/08/2026. O passo de deploy usa
+# `services update`, que FALHA se o serviço não existir com esse
+# nome/região - de propósito, pra errar alto em vez de criar um serviço
+# duplicado silenciosamente.
 
 substitutions:
   _SERVICE_NAME: update-memory
-  _REGION: us-central1
+  _REGION: europe-west1
 
 steps:
   - id: build
