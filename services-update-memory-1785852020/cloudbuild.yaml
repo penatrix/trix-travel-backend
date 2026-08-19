@@ -9,6 +9,12 @@
 # pasta do serviço (diferente do modo Buildpacks, que tinha o campo
 # "diretório de compilação" no próprio gatilho).
 #
+# GOOGLE_FUNCTION_TARGET é obrigatório no build: estes serviços são Cloud
+# Run *functions*, e o package.json não tem main nem scripts.start - quem
+# instala o functions-framework e define o entrypoint do container é o
+# buildpack, e só quando recebe essa variável. Sem ela o build passa mas a
+# revisão não sobe ("Creating Revision... failed").
+#
 # _SERVICE_NAME e _REGION abaixo foram confirmados contra o Cloud Run
 # (`gcloud run services list`) em 19/08/2026. O passo de deploy usa
 # `services update`, que FALHA se o serviço não existir com esse
@@ -16,6 +22,7 @@
 # duplicado silenciosamente.
 
 substitutions:
+  _FUNCTION_TARGET: updateTravelerMemory
   _SERVICE_NAME: update-memory
   _REGION: europe-west1
 
@@ -28,6 +35,7 @@ steps:
       - build
       - gcr.io/$PROJECT_ID/trix-update-memory:$COMMIT_SHA
       - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
       - --path=.
 
   - id: push
