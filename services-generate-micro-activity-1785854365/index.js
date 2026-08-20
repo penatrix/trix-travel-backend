@@ -198,7 +198,16 @@ exports.searchPlaces = async (req, res) => {
 
   // Usado tambem no funil pre-cadastro (antes de existir sessao) -- por isso
   // o token e opcional aqui, mas quando vier, precisa ser valido.
-  if (req.headers.authorization && !verifySupabaseAuth(req)) {
+  //
+  // Atencao ao header VAZIO: o app monta 'Authorization: Bearer <token>'
+  // sempre, e deslogado o token e string vazia. O header chegava como
+  // 'Bearer ' (truthy), caia no 401 e a busca de destino do onboarding
+  // pre-cadastro devolvia zero resultados. So rejeitamos quando existe um
+  // token de fato e ele nao confere.
+  const bearerToken = (req.headers.authorization || '')
+    .replace(/^Bearer\s*/i, '')
+    .trim();
+  if (bearerToken && !verifySupabaseAuth(req)) {
     return res.status(401).json({ error: 'Token de autenticação inválido.' });
   }
 
