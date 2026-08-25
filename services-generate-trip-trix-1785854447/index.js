@@ -1,5 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
+const { validarEConsertarRoteiro } = require('./validar-lugares');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -135,7 +136,31 @@ exports.generateTrip = async (req, res) => {
     // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
     const tripJsonObject = JSON.parse(cleanText);
 
+    // 2.5. Validação de status dos lugares, ANTES de virar 'ready'.
+    //
+    // O Gemini escreve a partir do treinamento: não tem como saber que um
+    // restaurante fechou. Quem sabe é o Google, e nós já pedimos ao modelo a
+    // string exata de busca. Lugar fechado é trocado em silêncio por um do
+    // banco de backup_activities daquela cidade - que é para isso que o
+    // prompt pede 4 por destino.
+    //
+    // Nunca lança: se o Google estiver fora, o roteiro sai como veio. Roteiro
+    // possivelmente desatualizado é ruim, roteiro nenhum é pior.
+    const resumoLugares = await validarEConsertarRoteiro(
+      tripJsonObject,
+      process.env.GOOGLE_MAPS_KEY,
+    );
+    console.log(
+      `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
+      `${resumoLugares.fechados} fechados, ${resumoLugares.trocados} trocados, ` +
+      `${resumoLugares.removidos} removidos, ${resumoLugares.nao_encontrados} não encontrados, ` +
+      `${resumoLugares.erros} erros.`,
+    );
+    resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
+
     const tripTitle = tripJsonObject.trip_title || 'Viagem Personalizada';
+    // Lido DEPOIS da validação de propósito: se houve troca ou remoção, o
+    // total foi reajustado e é esse valor que alimenta o controle de orçamento.
     const budgetActual = tripJsonObject.estimated_cost_brl;
 
     // 3. Sucesso: Atualiza os dados no Supabase para 'ready'
