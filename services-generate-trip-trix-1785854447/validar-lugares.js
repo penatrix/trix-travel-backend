@@ -260,12 +260,13 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
   const lugares = coletarLugares(roteiro);
   if (!lugares.length) return resumo;
 
-  const vereditos = await emLotes(lugares, CONCORRENCIA, (lugar) =>
-    consultarLugar(lugar.obj.maps_search_query, apiKey),
+  // ---- 1. Status de cada lugar ----
+  const vereditos = await emLotes(lugares, CONCORRENCIA, (l) =>
+    consultarLugar(l.obj.maps_search_query, apiKey),
   );
 
-  lugares.forEach((lugar, i) => {
-    lugar.veredito = vereditos[i];
+  lugares.forEach((l, i) => {
+    l.veredito = vereditos[i];
     resumo.verificados += 1;
     switch (vereditos[i].veredito) {
       case 'aberto': resumo.abertos += 1; break;
@@ -274,107 +275,42 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
       default: resumo.erros += 1;
     }
     // place_id resolvido deixa o link do Maps exato em vez de uma busca por
-    // texto. Continua sendo o Google quem geolocaliza, não o modelo.
-    if (vereditos[i].placeId) {
-      lugar.obj.place_id = vereditos[i].placeId;
-    }
+    // texto, e é o insumo da consulta de horário logo abaixo.
+    if (vereditos[i].placeId) l.obj.place_id = vereditos[i].placeId;
   });
 
-  // Banco de substitutos por destino: só backups confirmados abertos.
-  const bancoPorDestino = new Map();
-  for (const lugar of lugares) {
-    if (lugar.tipo !== 'backup') continue;
-    if (lugar.veredito.veredito !== 'aberto') continue;
-    if (!bancoPorDestino.has(lugar.destino)) bancoPorDestino.set(lugar.destino, []);
-    bancoPorDestino.get(lugar.destino).push(lugar.obj);
-  }
-
-  // Troca as atividades fechadas. Percorre de trás para frente porque
-  // remover altera os índices seguintes.
+  // ---- 2. Backup fechado sai antes de qualquer troca ----
+  // Oferecer um lugar fechado na troca de atividade seria o mesmo bug em
+  // outro lugar, e ele também não pode ser escolhido como substituto.
   for (const destino of roteiro?.destinations ?? []) {
-    const banco = bancoPorDestino.get(destino) ?? [];
-    for (const dia of destino?.itinerary ?? []) {
-      const atividades = dia?.activities ?? [];
-      for (let i = atividades.length - 1; i >= 0; i--) {
-        const registro = lugares.find(
-          (l) => l.tipo === 'atividade' && l.obj === atividades[i],
-        );
-        if (!registro || registro.veredito.veredito !== 'fechado') continue;
-
-        const custoSaiu = valorBrl(atividades[i].cost_estimate) ?? 0;
-        const substituto = banco.shift();
-        if (substituto) {
-          resumo.detalhes.push(
-            `${atividades[i].place} (${registro.veredito.status}) -> ${substituto.place}`,
-          );
-          // O período é da agenda, não do lugar: o substituto herda o horário
-          // do que saiu, senão o dia perde a estrutura manhã/tarde/noite.
-          atividades[i] = { ...substituto, period: atividades[i].period };
-          // Sai do banco de backup para não aparecer duas vezes no roteiro.
-          destino.backup_activities = (destino.backup_activities ?? []).filter(
-            (b) => b !== substituto,
-          );
-          resumo.trocados += 1;
-          resumo.deltaCusto += (valorBrl(substituto.cost_estimate) ?? 0) - custoSaiu;
-        } else {
-          resumo.detalhes.push(
-            `${atividades[i].place} (${registro.veredito.status}) -> removido, sem backup`,
-          );
-          atividades.splice(i, 1);
-          resumo.removidos += 1;
-          resumo.deltaCusto -= custoSaiu;
-        }
-      }
-    }
-
-    // Hospedagem fechada não tem substituto no banco - o backup é de
-    // atividade, não de hotel. Marcamos para o log; trocar hotel exigiria
-    // uma nova chamada de IA e é decisão de produto.
-    const hosp = lugares.find(
-      (l) => l.tipo === 'hospedagem' && l.destino === destino,
-    );
-    if (hosp && hosp.veredito.veredito === 'fechado') {
-      resumo.detalhes.push(
-        `HOSPEDAGEM FECHADA em ${destino.city}: ${destino.accommodation.name} (${hosp.veredito.status})`,
-      );
-    }
-
-    // Backups fechados saem do roteiro: eles existem para serem oferecidos
-    // ao usuário na troca de atividade, e oferecer um lugar fechado ali é o
-    // mesmo bug num lugar diferente.
     const antes = (destino.backup_activities ?? []).length;
     destino.backup_activities = (destino.backup_activities ?? []).filter((b) => {
       const r = lugares.find((l) => l.tipo === 'backup' && l.obj === b);
       return !r || r.veredito.veredito !== 'fechado';
     });
-    const removidosBackup = antes - destino.backup_activities.length;
-    if (removidosBackup > 0) {
+    const removidos = antes - destino.backup_activities.length;
+    if (removidos > 0) {
       resumo.detalhes.push(
-        `${removidosBackup} backup(s) fechado(s) removido(s) em ${destino.city}`,
+        `${removidos} backup(s) fechado(s) removido(s) em ${destino.city}`,
       );
     }
   }
 
-  // =====================================================================
-  // SEGUNDA PASSADA: horário de funcionamento
+  // ---- 3. Horários, ANTES de trocar qualquer coisa ----
   //
-  // Status pega o que fechou de vez; isto pega o museu que não abre segunda
-  // e o restaurante que só serve jantar. Só roda com a data de início da
-  // viagem: sem ela não dá para saber o dia da semana de cada dia.
-  //
-  // Só age quando o Google diz com certeza que NÃO abre na janela. Sem
-  // horário cadastrado (praça, mirante, praia) não é fechamento, e falso
-  // positivo aqui estragaria roteiro bom.
-  // =====================================================================
+  // Buscar os horários primeiro é o que impede gastar dois backups num
+  // problema só. Na trip 243 aconteceu exatamente isso: a troca por
+  // fechamento escolheu o Soya Cantine Bio às cegas, e a checagem de
+  // horário logo depois descobriu que ele não abre de manhã e teve que
+  // trocar de novo. Dois backups queimados, um problema resolvido.
   const dataInicio = opcoes.dataInicio;
-  if (dataInicio) {
-    const destinos = roteiro?.destinations ?? [];
+  const diaGlobal = new Map();
+  const horarioDe = new Map();
 
-    // O campo `day` pode ser global (1..N na viagem toda) ou reiniciar a
-    // cada destino. Detecta pelo primeiro dia de cada um.
+  if (dataInicio) {
+    // O campo `day` pode ser global ou reiniciar por destino.
     let offset = 0;
-    const diaGlobal = new Map();
-    for (const destino of destinos) {
+    for (const destino of roteiro?.destinations ?? []) {
       const dias = destino?.itinerary ?? [];
       const reinicia = offset > 0 && Number(dias[0]?.day) === 1;
       for (const dia of dias) {
@@ -384,90 +320,110 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
       offset += dias.length;
     }
 
-    const paraHorario = [];
-    for (const destino of destinos) {
-      for (const dia of destino?.itinerary ?? []) {
-        for (const a of dia?.activities ?? []) {
-          if (a?.place_id && normalizarPeriodo(a.period)) {
-            paraHorario.push({ tipo: 'atividade', obj: a, destino, dia });
-          }
-        }
-      }
-      for (const b of destino?.backup_activities ?? []) {
-        if (b?.place_id) paraHorario.push({ tipo: 'backup', obj: b, destino });
-      }
-    }
-
+    // Hospedagem fica de fora: não tem período, e hotel não se troca aqui.
+    const paraHorario = lugares.filter(
+      (l) =>
+        l.tipo !== 'hospedagem' &&
+        l.obj.place_id &&
+        l.veredito.veredito !== 'fechado',
+    );
     if (paraHorario.length) {
-      const horarios = await emLotes(paraHorario, CONCORRENCIA, (it) =>
-        consultarHorarios(it.obj.place_id, apiKey),
+      const horarios = await emLotes(paraHorario, CONCORRENCIA, (l) =>
+        consultarHorarios(l.obj.place_id, apiKey),
       );
-      paraHorario.forEach((it, i) => {
-        it.periods = horarios[i];
-      });
+      paraHorario.forEach((l, i) => horarioDe.set(l.obj, horarios[i]));
       resumo.horarios_verificados = paraHorario.length;
-
-      for (const destino of destinos) {
-        const banco = bancoPorDestino.get(destino) ?? [];
-        for (const dia of destino?.itinerary ?? []) {
-          const atividades = dia?.activities ?? [];
-          for (let i = 0; i < atividades.length; i++) {
-            const reg = paraHorario.find(
-              (h) => h.tipo === 'atividade' && h.obj === atividades[i],
-            );
-            if (!reg) continue;
-
-            const periodo = normalizarPeriodo(atividades[i].period);
-            const diaSemana = diaDaSemanaDoDia(dataInicio, diaGlobal.get(dia));
-            if (!periodo || diaSemana === null) continue;
-
-            // true (abre) ou null (sem dado) não mexem em nada.
-            if (abreNaJanela(reg.periods, diaSemana, JANELAS[periodo]) !== false) {
-              continue;
-            }
-            resumo.fora_do_horario += 1;
-
-            // O substituto precisa abrir na MESMA janela. Aceita quem não
-            // tem horário cadastrado; recusa só quem sabidamente não abre.
-            const idx = banco.findIndex((cand) => {
-              const rc = paraHorario.find(
-                (h) => h.tipo === 'backup' && h.obj === cand,
-              );
-              return (
-                abreNaJanela(rc?.periods, diaSemana, JANELAS[periodo]) !== false
-              );
-            });
-
-            if (idx === -1) {
-              resumo.detalhes.push(
-                `${atividades[i].place} não abre no período ${atividades[i].period} -> mantido, sem backup compatível`,
-              );
-              continue;
-            }
-
-            const substituto = banco.splice(idx, 1)[0];
-            const custoSaiu = valorBrl(atividades[i].cost_estimate) ?? 0;
-            resumo.detalhes.push(
-              `${atividades[i].place} não abre no período ${atividades[i].period} -> ${substituto.place}`,
-            );
-            atividades[i] = { ...substituto, period: atividades[i].period };
-            destino.backup_activities = (destino.backup_activities ?? []).filter(
-              (b) => b !== substituto,
-            );
-            resumo.trocados_por_horario += 1;
-            resumo.deltaCusto +=
-              (valorBrl(substituto.cost_estimate) ?? 0) - custoSaiu;
-          }
-        }
-      }
     }
   }
 
-  // O prompt exige que estimated_cost_brl seja a soma exata dos custos. Se
-  // trocamos ou removemos atividade, ele deixou de ser - e o valor alimenta
-  // o controle de orçamento em Minhas Viagens. Ajusta pela diferença em vez
-  // de recalcular tudo, para não brigar com o que o modelo somou de
-  // hospedagem.
+  /// true / false / null (sem dado). null nunca conta como fechado.
+  const abreNoPeriodo = (obj, dia, periodoBruto) => {
+    const periodo = normalizarPeriodo(periodoBruto);
+    const diaSemana = diaDaSemanaDoDia(dataInicio, diaGlobal.get(dia));
+    if (!periodo || diaSemana === null || !horarioDe.has(obj)) return null;
+    return abreNaJanela(horarioDe.get(obj), diaSemana, JANELAS[periodo]);
+  };
+
+  // ---- 4. Uma passada só de conserto ----
+  const bancoPorDestino = new Map();
+  for (const l of lugares) {
+    if (l.tipo !== 'backup') continue;
+    if (l.veredito.veredito !== 'aberto') continue;
+    if (!(l.destino.backup_activities ?? []).includes(l.obj)) continue;
+    if (!bancoPorDestino.has(l.destino)) bancoPorDestino.set(l.destino, []);
+    bancoPorDestino.get(l.destino).push(l.obj);
+  }
+
+  for (const destino of roteiro?.destinations ?? []) {
+    const banco = bancoPorDestino.get(destino) ?? [];
+    for (const dia of destino?.itinerary ?? []) {
+      const atividades = dia?.activities ?? [];
+      // De trás para frente: remover altera os índices seguintes.
+      for (let i = atividades.length - 1; i >= 0; i--) {
+        const atv = atividades[i];
+        const reg = lugares.find((l) => l.tipo === 'atividade' && l.obj === atv);
+        if (!reg) continue;
+
+        const fechado = reg.veredito.veredito === 'fechado';
+        const foraDoHorario =
+          !fechado && abreNoPeriodo(atv, dia, atv.period) === false;
+        if (!fechado && !foraDoHorario) continue;
+        if (foraDoHorario) resumo.fora_do_horario += 1;
+
+        const rotulo = fechado
+          ? `${atv.place} (${reg.veredito.status})`
+          : `${atv.place} não abre no período ${atv.period}`;
+
+        // O substituto precisa passar nos DOIS critérios de uma vez: aberto
+        // (já garantido pelo banco) E compatível com o período do slot.
+        const idx = banco.findIndex(
+          (cand) => abreNoPeriodo(cand, dia, atv.period) !== false,
+        );
+        const custoSaiu = valorBrl(atv.cost_estimate) ?? 0;
+
+        if (idx === -1) {
+          if (fechado) {
+            // Lugar fechado não pode ficar de jeito nenhum.
+            resumo.detalhes.push(`${rotulo} -> removido, sem backup`);
+            atividades.splice(i, 1);
+            resumo.removidos += 1;
+            resumo.deltaCusto -= custoSaiu;
+          } else {
+            // Período errado é ruim; buraco no dia é pior.
+            resumo.detalhes.push(`${rotulo} -> mantido, sem backup compatível`);
+          }
+          continue;
+        }
+
+        const substituto = banco.splice(idx, 1)[0];
+        resumo.detalhes.push(`${rotulo} -> ${substituto.place}`);
+        // O período é da agenda, não do lugar.
+        atividades[i] = { ...substituto, period: atv.period };
+        destino.backup_activities = (destino.backup_activities ?? []).filter(
+          (b) => b !== substituto,
+        );
+        if (fechado) resumo.trocados += 1;
+        else resumo.trocados_por_horario += 1;
+        resumo.deltaCusto += (valorBrl(substituto.cost_estimate) ?? 0) - custoSaiu;
+      }
+    }
+
+    // Hospedagem fechada não tem substituto: o banco é de atividade. Vira
+    // log; trocar hotel exigiria nova chamada de IA e é decisão de produto.
+    const hosp = lugares.find(
+      (l) => l.tipo === 'hospedagem' && l.destino === destino,
+    );
+    if (hosp && hosp.veredito.veredito === 'fechado') {
+      resumo.detalhes.push(
+        `HOSPEDAGEM FECHADA em ${destino.city}: ${destino.accommodation.name} (${hosp.veredito.status})`,
+      );
+    }
+  }
+
+  // ---- 5. Custo ----
+  // O prompt exige que estimated_cost_brl seja a soma exata, e esse valor
+  // alimenta o controle de orçamento em Minhas Viagens. Ajusta pela
+  // diferença em vez de recalcular, para não brigar com a hospedagem.
   const totalAtual = valorBrl(roteiro?.estimated_cost_brl);
   if (resumo.deltaCusto !== 0 && totalAtual != null) {
     const novo = Math.max(0, Math.round(totalAtual + resumo.deltaCusto));
