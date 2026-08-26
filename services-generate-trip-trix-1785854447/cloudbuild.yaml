@@ -54,6 +54,15 @@ steps:
       - ${_SERVICE_NAME}
       - --image=gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA
       - --region=${_REGION}
+      # O padrão do Cloud Run functions é 60s. A geração de um roteiro leva
+      # ~55s no ritmo Balanced e passa de 90s no Action-packed, que gera quase
+      # o dobro de atividades. Ao estourar, o Cloud Run corta a requisição no
+      # meio, a conexão de saída para o Gemini morre e o Node reporta o
+      # genérico "fetch failed" - foi o que derrubou a trip 242.
+      #
+      # Fica explícito aqui, e não só no console, para não voltar ao padrão
+      # silenciosamente num serviço recriado.
+      - --timeout=900
 
 images:
   - gcr.io/$PROJECT_ID/trix-generate-trip:$COMMIT_SHA

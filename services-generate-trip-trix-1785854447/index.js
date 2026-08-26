@@ -40,6 +40,45 @@ function verifyWebhookSecret(req) {
   return !!expected && provided === expected;
 }
 
+
+// =================================================================
+// Chamada ao Gemini com timeout explícito e uma retentativa.
+//
+// O fetch do Node não tem timeout padrão: sem AbortController, uma
+// conexão pendurada fica pendurada até alguém cortar - e quem cortava
+// era o Cloud Run, devolvendo o opaco "fetch failed".
+//
+// Uma retentativa só, e só em falha de REDE. Erro HTTP (429, 500) já é
+// tratado por quem chama, e repetir uma geração cara às cegas é pior do
+// que falhar rápido.
+// =================================================================
+const GEMINI_TIMEOUT_MS = 8 * 60 * 1000;
+
+async function fetchGemini(url, body, rotulo) {
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+    try {
+      return await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (erro) {
+      const motivo = erro.name === 'AbortError'
+        ? `timeout de ${GEMINI_TIMEOUT_MS / 1000}s`
+        : (erro.cause?.code || erro.message);
+      console.error(`[Gemini] ${rotulo}: tentativa ${tentativa} falhou (${motivo}).`);
+      if (tentativa === 2) {
+        throw new Error(`Falha de rede ao chamar o Gemini (${rotulo}): ${motivo}`);
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 exports.generateTrip = async (req, res) => {
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
@@ -106,17 +145,17 @@ exports.generateTrip = async (req, res) => {
     }
 
     // 1. Chama a API do Gemini Pro com Thinking MEDIUM
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    const geminiResponse = await fetchGemini(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         generationConfig: {
           maxOutputTokens: 16384,
           thinkingConfig: { thinkingLevel: "MEDIUM" }
         }
-      })
-    });
+      },
+      `trip ${tripId}`,
+    );
 
     // Fail-fast: Verifica se a API do Gemini rejeitou a requisição (ex: Timeout ou Rate Limit)
     if (!geminiResponse.ok) {
