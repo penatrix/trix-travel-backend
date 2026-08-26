@@ -74,8 +74,16 @@ exports.generateTrip = async (req, res) => {
     // aqui é a trava de verdade, servidor nunca confia só no cliente.
     // exclude_trip_id evita que a própria linha sendo processada conte
     // contra a cota dela mesma.
+    //
+    // consume_trip_quota, e não can_generate_trip: a segunda tinha nome de
+    // pergunta mas consumia o crédito, e era chamada duas vezes por roteiro
+    // - uma pelo app antes de criar a linha, outra aqui. A segunda nunca
+    // achava o crédito que a primeira tinha acabado de gastar, então o
+    // crédito ia embora e o roteiro morria com QUOTA_EXCEEDED (MGM-06).
+    // Agora a pergunta é só leitura, que é o que o app usa, e o consumo
+    // mora só aqui - concedido apenas ao service_role.
     // =================================================================
-    const { data: canGenerate, error: entitlementError } = await supabase.rpc('can_generate_trip', {
+    const { data: canGenerate, error: entitlementError } = await supabase.rpc('consume_trip_quota', {
       p_user_id: tripRecord.user_id,
       p_exclude_trip_id: tripId,
     });
