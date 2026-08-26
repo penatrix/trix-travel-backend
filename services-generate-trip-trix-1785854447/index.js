@@ -154,15 +154,25 @@ exports.generateTrip = async (req, res) => {
     //
     // Nunca lança: se o Google estiver fora, o roteiro sai como veio. Roteiro
     // possivelmente desatualizado é ruim, roteiro nenhum é pior.
+    // start_date entra porque a checagem de horário precisa saber o dia da
+    // semana de cada dia do roteiro: museu fechado na segunda só aparece se
+    // soubermos que o dia 3 cai numa segunda. Sem a data, a segunda passada
+    // não roda e o resto continua igual.
     const resumoLugares = await validarEConsertarRoteiro(
       tripJsonObject,
       process.env.GOOGLE_MAPS_KEY,
+      { dataInicio: tripRecord.start_date },
     );
     console.log(
       `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
       `${resumoLugares.fechados} fechados, ${resumoLugares.trocados} trocados, ` +
       `${resumoLugares.removidos} removidos, ${resumoLugares.nao_encontrados} não encontrados, ` +
       `${resumoLugares.erros} erros.`,
+    );
+    console.log(
+      `[Horários] Trip ${tripId}: ${resumoLugares.horarios_verificados} verificados, ` +
+      `${resumoLugares.fora_do_horario} fora do período, ` +
+      `${resumoLugares.trocados_por_horario} trocados.`,
     );
     resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
 
