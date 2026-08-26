@@ -82,6 +82,12 @@ async function fetchGemini(url, body, rotulo) {
 exports.generateTrip = async (req, res) => {
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
+  // Idem para o estorno: o catch precisa saber DE QUEM devolver o crédito e
+  // se a cota chegou a ser consumida. Sem o flag, uma falha anterior ao
+  // consumo (webhook mal formado, status já processado) tentaria estornar
+  // algo que nunca foi cobrado.
+  let userId = null;
+  let cotaConsumida = false;
 
   try {
     if (!verifyWebhookSecret(req)) {
@@ -104,6 +110,7 @@ exports.generateTrip = async (req, res) => {
     }
 
     tripId = tripRecord.id;
+    userId = tripRecord.user_id;
     const promptText = tripRecord.prompt_payload;
 
     // =================================================================
@@ -144,13 +151,25 @@ exports.generateTrip = async (req, res) => {
       return res.status(200).json({ success: true, message: 'Bloqueado por limite do plano gratuito' });
     }
 
+    // A partir daqui a cota já foi cobrada. Qualquer falha adiante precisa
+    // passar pelo estorno no catch - a viagem 242 morreu depois deste ponto
+    // e o crédito foi embora com ela.
+    cotaConsumida = true;
+
     // 1. Chama a API do Gemini Pro com Thinking MEDIUM
     const geminiResponse = await fetchGemini(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         generationConfig: {
-          maxOutputTokens: 16384,
+          // 16384 era suficiente quando o roteiro saía com ~13 atividades e
+          // 4 backups fixos. Hoje um Action-packed de 8 dias pede 40
+          // atividades + 8 backups, cada uma com descrição, logística e
+          // custo em pt-BR. Estourar o teto não devolve um roteiro menor:
+          // devolve um JSON cortado no meio, que quebra no JSON.parse e
+          // custa o mesmo. O limite só é cobrado pelo que for gerado de
+          // fato, então folga aqui não tem custo por si só.
+          maxOutputTokens: 32768,
           thinkingConfig: { thinkingLevel: "MEDIUM" }
         }
       },
@@ -168,6 +187,19 @@ exports.generateTrip = async (req, res) => {
     // Validação de segurança estrutural
     if (!geminiData.candidates || !geminiData.candidates[0].content) {
       throw new Error("Resposta do Gemini em formato inesperado ou vazia.");
+    }
+
+    // MAX_TOKENS não chega como erro: chega como resposta 200 com o texto
+    // cortado no meio de uma chave. Sem esta checagem, o que aparece no
+    // error_log é "Unexpected end of JSON input", que não diz nada sobre a
+    // causa - e estouro de MAX_TOKENS já derrubou roteiro longo antes.
+    // Melhor falhar dizendo o nome do problema.
+    const finishReason = geminiData.candidates[0].finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      throw new Error(
+        `Gemini interrompeu a geração (finishReason: ${finishReason}). ` +
+        `Se for MAX_TOKENS, o roteiro passou do teto de saída e o JSON veio cortado.`,
+      );
     }
 
     let tokenCount = 0;
@@ -189,7 +221,7 @@ exports.generateTrip = async (req, res) => {
     // restaurante fechou. Quem sabe é o Google, e nós já pedimos ao modelo a
     // string exata de busca. Lugar fechado é trocado em silêncio por um do
     // banco de backup_activities daquela cidade - que é para isso que o
-    // prompt pede 4 por destino.
+    // prompt pede backups proporcionais ao tamanho do roteiro.
     //
     // Nunca lança: se o Google estiver fora, o roteiro sai como veio. Roteiro
     // possivelmente desatualizado é ruim, roteiro nenhum é pior.
@@ -255,6 +287,40 @@ exports.generateTrip = async (req, res) => {
         console.log(`Status da trip ${tripId} revertido para 'failed' com sucesso.`);
       } catch (dbError) {
         console.error(`Falha catastrófica ao tentar atualizar a trip ${tripId} para failed:`, dbError);
+      }
+    }
+
+    // 5. ESTORNO: a cota é cobrada antes de chamar o Gemini, para não
+    // queimar tokens de quem não tem direito. O preço disso é que uma falha
+    // adiante deixa o usuário sem roteiro E sem crédito - foi o que
+    // aconteceu com a viagem 242.
+    //
+    // Roda DEPOIS do update para 'failed', e a ordem importa: a função
+    // decide se houve cobrança contando os roteiros não-falhos do mês, e
+    // exclui esta trip da contagem justamente para não depender do status
+    // dela. Se o update acima falhar, o estorno ainda dá o mesmo resultado.
+    //
+    // Nunca lança: já estamos no catch, e um erro aqui só trocaria a causa
+    // real do problema no log por uma acessória.
+    if (cotaConsumida && userId && tripId) {
+      try {
+        const { data: estornou, error: refundError } = await supabase.rpc('refund_trip_quota', {
+          p_user_id: userId,
+          p_trip_id: tripId,
+        });
+
+        if (refundError) {
+          console.error(`[Estorno] Trip ${tripId}: falhou - ${refundError.message}`);
+        } else if (estornou) {
+          console.log(`[Estorno] Trip ${tripId}: crédito devolvido ao usuário ${userId}.`);
+        } else {
+          // Dois casos legítimos: era o roteiro gratuito do mês (nada foi
+          // cobrado) ou esta trip já tinha sido estornada numa retentativa
+          // anterior do webhook.
+          console.log(`[Estorno] Trip ${tripId}: nada a devolver.`);
+        }
+      } catch (refundError) {
+        console.error(`[Estorno] Trip ${tripId}: erro inesperado -`, refundError);
       }
     }
 
