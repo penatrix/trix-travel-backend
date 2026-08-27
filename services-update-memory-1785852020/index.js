@@ -39,6 +39,93 @@ function verifyWebhookSecret(req) {
   return !!expected && provided === expected;
 }
 
+// =================================================================
+// MEMÓRIA DO VIAJANTE: PESO EM VEZ DE DUAS LISTAS QUE SÓ CRESCEM
+// =================================================================
+//
+// O travel_dna guardava `likes` e `dislikes` como duas listas que só
+// cresciam, e nada nunca olhava uma contra a outra. A conta de teste
+// terminou com "art museums" e "local history" nas DUAS - e o prompt do
+// roteiro manda interpretar as tags literalmente, então o modelo recebia
+// ordens opostas e fugia do assunto inteiro. Nos roteiros 240-242, de
+// Roma, os três saíram quase só com cafés veganos e nenhuma atração
+// clássica.
+//
+// A causa não é acúmulo lento entre vários usos: está no prompt de
+// `replace`, que pede numa tacada "o que ele NÃO gosta na atividade
+// antiga e o que gosta na nova". Trocar um museu por outro museu produz
+// "museums" nos dois arrays da MESMA resposta.
+//
+// Agora cada tag tem um peso inteiro: +1 por sinal de gosto, -1 por
+// sinal de rejeição. `likes` e `dislikes` continuam existindo no
+// travel_dna, mas passam a ser DERIVADOS do peso - por isso o app não
+// precisa mudar nada. Tag com peso 0 (mesma quantidade de sinal dos dois
+// lados) não entra em lista nenhuma, que é a leitura honesta de "não
+// sabemos".
+//
+// Nenhuma migração de banco: `pesosAtuais` semeia os pesos a partir das
+// listas antigas na primeira escrita depois deste deploy, e uma tag que
+// estava nas duas cancela sozinha.
+
+// Um por lista, como era antes. O prompt do roteiro imprime as duas.
+const LIMITE_POR_LISTA = 15;
+// Teto do mapa de pesos. Maior que 2x o limite de lista de propósito: uma
+// tag pode cair de "likes" e continuar valendo como histórico se voltar.
+const LIMITE_PESOS = 40;
+
+const normalizarTags = (tags) =>
+  (Array.isArray(tags) ? tags : [])
+    .filter((t) => typeof t === 'string')
+    .map((t) => t.toLowerCase().trim())
+    .filter((t) => t.length > 0);
+
+/// Pesos de onde partir. Já existindo `tag_weights`, é ele. Senão, semeia
+/// pelas listas antigas: +1 por like, -1 por dislike. Tag que estava nas
+/// duas soma zero e desaparece das duas - a contradição já gravada se
+/// resolve na primeira escrita, sem script de migração.
+function pesosAtuais(dna) {
+  const guardados = dna && dna.tag_weights;
+  if (guardados && typeof guardados === 'object' && !Array.isArray(guardados)) {
+    const pesos = {};
+    for (const [tag, valor] of Object.entries(guardados)) {
+      const limpo = String(tag).toLowerCase().trim();
+      if (limpo && Number.isFinite(Number(valor))) pesos[limpo] = Number(valor);
+    }
+    return pesos;
+  }
+
+  const pesos = {};
+  for (const tag of normalizarTags(dna && dna.likes)) {
+    pesos[tag] = (pesos[tag] ?? 0) + 1;
+  }
+  for (const tag of normalizarTags(dna && dna.dislikes)) {
+    pesos[tag] = (pesos[tag] ?? 0) - 1;
+  }
+  return pesos;
+}
+
+/// Deriva as duas listas a partir dos pesos.
+///
+/// A poda é por |peso|, não por recência: o corte tira o sinal mais fraco,
+/// não o mais antigo. Uma preferência confirmada cinco vezes sobrevive a
+/// uma tag que apareceu uma vez semana passada.
+function derivarListas(pesos) {
+  const ativos = Object.entries(pesos)
+    .filter(([, p]) => Number.isFinite(p) && p !== 0)
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .slice(0, LIMITE_PESOS);
+
+  return {
+    tag_weights: Object.fromEntries(ativos),
+    likes: ativos.filter(([, p]) => p > 0).map(([t]) => t).slice(0, LIMITE_POR_LISTA),
+    dislikes: ativos.filter(([, p]) => p < 0).map(([t]) => t).slice(0, LIMITE_POR_LISTA),
+  };
+}
+
+// Exportado só para teste. Não é entrypoint de função: o deploy aponta
+// para um nome específico, os demais exports são ignorados.
+exports._memoria = { normalizarTags, pesosAtuais, derivarListas };
+
 exports.generateTrip = async (req, res) => {
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
@@ -532,7 +619,7 @@ exports.updateTravelerMemory = async (req, res) => {
     const incomingDislikes = Array.isArray(newTags.dislikes) ? newTags.dislikes : [];
 
     // =================================================================
-    // O MERGE INTELIGENTE NO SUPABASE
+    // O MERGE POR PESO
     // =================================================================
 
     // Busca o DNA atual
@@ -549,19 +636,24 @@ exports.updateTravelerMemory = async (req, res) => {
       likes: [], dislikes: [], dietary: [], pacing: "", budget_level: "", travel_style: []
     };
 
-    // Função auxiliar para normalizar e juntar arrays sem duplicatas
-    const mergeAndClean = (arr1, arr2) => {
-      const combined = [...(arr1 || []), ...(arr2 || [])];
-      // Tudo minúsculo e sem espaços extras para evitar "Museu" e " museu"
-      const normalized = combined.map(tag => tag.toLowerCase().trim());
-      // Remove duplicatas
-      const unique = [...new Set(normalized)];
-      // Limite máximo de 15 tags para não estourar tokens no futuro
-      return unique.slice(-15);
-    };
+    const pesos = pesosAtuais(currentDna);
+    const antes = { ...pesos };
 
-    currentDna.likes = mergeAndClean(currentDna.likes, incomingLikes);
-    currentDna.dislikes = mergeAndClean(currentDna.dislikes, incomingDislikes);
+    // +1 por sinal de gosto, -1 por sinal de rejeição. Quando a MESMA tag
+    // vem nos dois arrays da mesma resposta - que é o caso de trocar um
+    // museu por outro museu - os dois se cancelam e ela não entra em lista
+    // nenhuma. Antes ela entrava nas duas.
+    for (const tag of normalizarTags(incomingLikes)) {
+      pesos[tag] = (pesos[tag] ?? 0) + 1;
+    }
+    for (const tag of normalizarTags(incomingDislikes)) {
+      pesos[tag] = (pesos[tag] ?? 0) - 1;
+    }
+
+    const derivado = derivarListas(pesos);
+    currentDna.tag_weights = derivado.tag_weights;
+    currentDna.likes = derivado.likes;
+    currentDna.dislikes = derivado.dislikes;
 
     // Salva o DNA atualizado no banco
     const { error: updateError } = await supabase
@@ -570,6 +662,17 @@ exports.updateTravelerMemory = async (req, res) => {
       .eq('id', user_id);
 
     if (updateError) throw new Error(`Erro ao atualizar Supabase: ${updateError.message}`);
+
+    // Log do que mudou de peso, para conseguir auditar a memória depois sem
+    // precisar diffar o JSON inteiro na mão.
+    const mudancas = Object.keys(derivado.tag_weights)
+      .filter((t) => derivado.tag_weights[t] !== antes[t])
+      .map((t) => `${t}: ${antes[t] ?? 0} -> ${derivado.tag_weights[t]}`);
+    const zeradas = Object.keys(antes).filter(
+      (t) => antes[t] !== 0 && !(t in derivado.tag_weights),
+    );
+    if (mudancas.length) console.log(`[TravelerMemory] ${user_id} pesos: ${mudancas.join(' | ')}`);
+    if (zeradas.length) console.log(`[TravelerMemory] ${user_id} neutralizadas: ${zeradas.join(', ')}`);
 
     console.log(`[TravelerMemory] Memória atualizada com sucesso para ${user_id}. Tokens usados: ${tokenCount}`);
 
