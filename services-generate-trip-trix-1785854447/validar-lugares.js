@@ -421,14 +421,33 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
   }
 
   // ---- 5. Custo ----
-  // O prompt exige que estimated_cost_brl seja a soma exata, e esse valor
-  // alimenta o controle de orçamento em Minhas Viagens. Ajusta pela
-  // diferença em vez de recalcular, para não brigar com a hospedagem.
+  // O prompt exige que estimated_cost_brl seja a soma exata do
+  // cost_breakdown, e esse valor alimenta o controle de orçamento em
+  // Minhas Viagens. Ajusta pela diferença em vez de recalcular, para não
+  // brigar com passagem, hospedagem e as outras linhas.
   const totalAtual = valorBrl(roteiro?.estimated_cost_brl);
   if (resumo.deltaCusto !== 0 && totalAtual != null) {
     const novo = Math.max(0, Math.round(totalAtual + resumo.deltaCusto));
     roteiro.estimated_cost_brl = novo;
     resumo.custoAjustado = { de: totalAtual, para: novo };
+
+    // A troca mexeu SÓ em atividade, então só a linha de atividades muda.
+    // Sem isto o breakdown deixaria de somar o total - e ele existe
+    // justamente para o número ser reconciliável pelo usuário.
+    const bd = roteiro.cost_breakdown;
+    if (bd && typeof bd === 'object' && !Array.isArray(bd)) {
+      const atividades = valorBrl(bd.activities_and_tickets);
+      if (atividades != null) {
+        bd.activities_and_tickets = Math.max(
+          0,
+          Math.round(atividades + resumo.deltaCusto),
+        );
+        resumo.custoAjustado.atividades = {
+          de: atividades,
+          para: bd.activities_and_tickets,
+        };
+      }
+    }
   }
 
   return resumo;
