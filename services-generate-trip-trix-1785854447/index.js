@@ -131,16 +131,65 @@ exports.generateTrip = async (req, res) => {
 
     // =================================================================
     // A NOSSA TRAVA CONTRA LOOP INFINITO (FAIL-FAST)
-    // Se o status não for 'generating', não fazemos nada.
+    //
+    // O status vem do BANCO, não de req.body.record, e a diferença vale
+    // crédito. O payload do webhook é um retrato congelado no instante do
+    // gatilho. Ele já protegia contra o AUTO-DISPARO - o UPDATE para
+    // 'ready'/'failed' no fim daqui re-dispara o webhook, e aí o retrato
+    // chega com o status novo e a chamada morre neste if. Mas não protegia
+    // contra REENTREGA da mesma chamada: ali o retrato chega com
+    // 'generating' outra vez, por mais que a linha já esteja pronta.
+    //
+    // E aí a assimetria mordia. consume_trip_quota NÃO é idempotente: ele
+    // conta os roteiros do mês excluindo esta trip, então o status dela
+    // não muda a conta e o segundo consumo decrementa de novo.
+    // refund_trip_quota é idempotente por índice único
+    // (entitlements_refunded_trip_id_key): estorna uma vez por roteiro,
+    // para sempre. Consumo ilimitado com estorno único vaza crédito -
+    // duas falhas seguidas custam um crédito e não entregam roteiro, e um
+    // 200 perdido cobra dois créditos por uma viagem só.
+    //
+    // Relendo, a reentrega vê 'ready' ou 'failed' e sai aqui. E se o
+    // processo tiver morrido no meio - o Cloud Run cortando mata o
+    // processo sem passar pelo catch - a linha continua em 'generating',
+    // e reprocessar é exatamente o que se quer.
+    //
+    // Custa uma leitura por requisição, antes de qualquer coisa cara.
+    //
+    // O que ISTO NÃO cobre: a leitura e o consumo não são atômicos, então
+    // duas entregas concorrentes da MESMA chamada ainda podem ler
+    // 'generating' as duas e consumir duas vezes. A janela deixa de ser
+    // sempre e passa a ser só a simultaneidade. Fechar de vez pediria
+    // marcar posse numa única escrita condicional (algo como
+    // "update ... set status='processing' where id=? and status='generating'
+    // returning *"), e isso é um status novo na máquina de estados que o
+    // app também lê - mudança maior, decidida à parte.
     // =================================================================
-    if (tripRecord.status !== 'generating') {
-      console.log(`[Segurança] Ignorando trigger. A trip ${tripRecord.id} está com status: ${tripRecord.status}`);
+    const { data: tripAtual, error: leituraError } = await supabase
+      .from('trips')
+      .select('id, user_id, status, prompt_payload, start_date')
+      .eq('id', tripRecord.id)
+      .maybeSingle();
+
+    if (leituraError) {
+      throw new Error(`Falha ao reler a trip ${tripRecord.id}: ${leituraError.message}`);
+    }
+
+    // Exclusão é permanente por LGPD: a linha pode ter sumido entre o
+    // gatilho e esta leitura. Não é erro, e não há onde gravar 'failed'.
+    if (!tripAtual) {
+      console.log(`[Segurança] Ignorando trigger. A trip ${tripRecord.id} não existe mais.`);
+      return res.status(200).json({ success: true, message: "Trip inexistente" });
+    }
+
+    if (tripAtual.status !== 'generating') {
+      console.log(`[Segurança] Ignorando trigger. A trip ${tripAtual.id} está com status: ${tripAtual.status}`);
       return res.status(200).json({ success: true, message: "Ignorado para evitar loop" });
     }
 
-    tripId = tripRecord.id;
-    userId = tripRecord.user_id;
-    const promptText = tripRecord.prompt_payload;
+    tripId = tripAtual.id;
+    userId = tripAtual.user_id;
+    const promptText = tripAtual.prompt_payload;
 
     // =================================================================
     // P1.2: TRAVA DO PLANO GRATUITO
@@ -159,7 +208,7 @@ exports.generateTrip = async (req, res) => {
     // mora só aqui - concedido apenas ao service_role.
     // =================================================================
     const { data: canGenerate, error: entitlementError } = await supabase.rpc('consume_trip_quota', {
-      p_user_id: tripRecord.user_id,
+      p_user_id: tripAtual.user_id,
       p_exclude_trip_id: tripId,
     });
 
@@ -176,7 +225,7 @@ exports.generateTrip = async (req, res) => {
         })
         .eq('id', tripId);
 
-      console.log(`[Quota] Trip ${tripId} bloqueada: usuário ${tripRecord.user_id} sem cota gratuita nem crédito.`);
+      console.log(`[Quota] Trip ${tripId} bloqueada: usuário ${tripAtual.user_id} sem cota gratuita nem crédito.`);
       return res.status(200).json({ success: true, message: 'Bloqueado por limite do plano gratuito' });
     }
 
@@ -261,7 +310,7 @@ exports.generateTrip = async (req, res) => {
     const resumoLugares = await validarEConsertarRoteiro(
       tripJsonObject,
       process.env.GOOGLE_MAPS_KEY,
-      { dataInicio: tripRecord.start_date },
+      { dataInicio: tripAtual.start_date },
     );
     console.log(
       `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
