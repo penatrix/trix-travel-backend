@@ -403,23 +403,68 @@ exports.generateMicroActivity = async (req, res) => {
 
     console.log(`[MicroActivity] Iniciando requisição para o Gemini...`);
 
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: {
-          maxOutputTokens: 4096,
-        }
-      })
-    });
+    const inicio = Date.now();
 
-    if (!geminiResponse.ok) {
-      const errorText = await geminiResponse.text();
-      throw new Error(`Falha Gemini: ${geminiResponse.status} - ${errorText}`);
+    // TETO DE ESPERA
+    //
+    // Não havia nenhum. Sem timeout, uma chamada lenta fica pendurada até o
+    // timeout do próprio Cloud Run, que é de minutos - e do outro lado o app
+    // segura um spinner modal esse tempo todo. Medido em 01/09: uma troca
+    // levou quase 4 minutos, com o usuário olhando para um círculo girando.
+    //
+    // 45s é folgado para uma sugestão única e ainda assim falha cedo o
+    // bastante para a pessoa poder tentar de novo em vez de desistir.
+    const controlador = new AbortController();
+    const alarme = setTimeout(() => controlador.abort(), 45000);
+
+    let geminiData;
+    try {
+      const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: promptText }] }],
+          generationConfig: {
+            maxOutputTokens: 4096,
+            // Sugerir UM lugar numa cidade é tarefa de recuperação, não de
+            // raciocínio longo. Sem esta linha o modelo rodava no nível de
+            // thinking padrão dele - ausente não é desligado - e gastava
+            // ~2k tokens para devolver um JSON de cinco campos cuja saída
+            // não passa de ~150. O resto era pensamento.
+            //
+            // Repare que generateTrip declara MEDIUM e o brainstorming
+            // omite de propósito, com comentário. Aqui a omissão não tinha
+            // comentário nenhum: era esquecimento, não escolha.
+            //
+            // É mudança de qualidade percebida, e o CLAUDE.md manda medir.
+            // Está indo com o Paulo comparando as sugestões antes e depois.
+            thinkingConfig: { thinkingLevel: "LOW" }
+          }
+        }),
+        signal: controlador.signal,
+      });
+
+      if (!geminiResponse.ok) {
+        const errorText = await geminiResponse.text();
+        throw new Error(`Falha Gemini: ${geminiResponse.status} - ${errorText}`);
+      }
+
+      geminiData = await geminiResponse.json();
+    } catch (erroDaChamada) {
+      if (erroDaChamada.name === 'AbortError') {
+        throw new Error('Gemini nao respondeu em 45s na troca de atividade.');
+      }
+      throw erroDaChamada;
+    } finally {
+      // Sempre, inclusive no caminho feliz: um timer pendurado segura a
+      // instância viva sem motivo.
+      clearTimeout(alarme);
     }
 
-    const geminiData = await geminiResponse.json();
+    // Latência explícita no log. Sem isto, "está lento" era impressão, e
+    // comparar antes e depois de mexer no thinking exigia cronometrar na
+    // mão pelo carimbo de hora de duas linhas diferentes.
+    console.log(`[MicroActivity] Gemini respondeu em ${Date.now() - inicio}ms.`);
 
     if (!geminiData.candidates || !geminiData.candidates[0].content) {
       throw new Error("Resposta vazia do Gemini.");
