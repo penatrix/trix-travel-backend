@@ -585,8 +585,17 @@ exports.updateTravelerMemory = async (req, res) => {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: promptContext }] }],
         generationConfig: {
-          maxOutputTokens: 1024, // Consumo minúsculo
-          temperature: 0.2 // Baixa criatividade, queremos precisão e obediência ao JSON
+          maxOutputTokens: 2048,
+          temperature: 0.2, // Baixa criatividade, queremos precisão e obediência ao JSON
+          // Destilar uma troca em duas listas de tags curtas é
+          // classificação, não raciocínio. Sem esta linha o modelo rodava
+          // no nível de thinking padrão e o pensamento COMIA o orçamento
+          // de saída: o JSON vinha cortado no meio e o handler quebrava
+          // com "Unterminated string in JSON at position 116".
+          //
+          // A dobra do maxOutputTokens é cinto e suspensório. O consumo
+          // real de tags é minúsculo; o que estourava não era a resposta.
+          thinkingConfig: { thinkingLevel: "LOW" }
         }
       })
     });
@@ -600,6 +609,15 @@ exports.updateTravelerMemory = async (req, res) => {
 
     if (!geminiData.candidates || !geminiData.candidates[0].content) {
       throw new Error("Resposta do Gemini em formato inesperado ou vazia.");
+    }
+
+    // Truncamento tem que se identificar. Sem isto, resposta cortada
+    // chegava no JSON.parse e o erro no log falava de aspas e coluna, que
+    // manda quem investiga procurar defeito no prompt em vez de no teto
+    // de tokens.
+    const finishReason = geminiData.candidates[0].finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      throw new Error(`Gemini interrompeu a resposta (finishReason: ${finishReason}). Resposta incompleta, memória não atualizada.`);
     }
 
     let tokenCount = 0;
