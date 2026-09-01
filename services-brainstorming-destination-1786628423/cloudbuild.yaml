@@ -54,6 +54,18 @@ steps:
       - ${_SERVICE_NAME}
       - --image=gcr.io/$PROJECT_ID/trix-brainstorming-destination:$COMMIT_SHA
       - --region=${_REGION}
+      # Este serviço rodava no padrão de 60s e sem nenhum teto próprio na
+      # chamada ao Gemini - a mesma combinação que derrubou a trip 242 no
+      # generate-trip. Quando a plataforma corta, ela mata o processo: o
+      # catch não roda e a linha fica presa em 'generating'.
+      #
+      # Agora o handler aborta em 45s, então quem falha primeiro é sempre o
+      # nosso lado, que sabe gravar 'failed'. Os 90s aqui são a folga para o
+      # catch e a escrita no Supabase acontecerem depois disso.
+      #
+      # Fica explícito no arquivo, e não só no console, para não voltar ao
+      # padrão silenciosamente num serviço recriado.
+      - --timeout=90
 
 images:
   - gcr.io/$PROJECT_ID/trix-brainstorming-destination:$COMMIT_SHA

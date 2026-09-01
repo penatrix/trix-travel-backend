@@ -41,6 +41,23 @@ function verifyWebhookSecret(req) {
 
 
 // =================================================================
+// Teto da chamada ao Gemini.
+//
+// Precisa ser MENOR que o --timeout do Cloud Run (90s, no
+// cloudbuild.yaml deste serviço), senão quem corta é a plataforma - e aí
+// o processo morre, o catch não roda e a linha fica presa em
+// 'generating'. Abortando aqui dentro, a falha vira status 'failed' e o
+// usuário recebe retorno.
+//
+//   45s de teto + o catch e a escrita no Supabase  <  90s do Cloud Run
+//
+// 45s é generoso para 3 cards: o roteiro inteiro, que é muito maior,
+// leva de 55s a 90s. Se o log de latência mostrar que sobra folga, dá
+// para apertar.
+// =================================================================
+const GEMINI_TIMEOUT_MS = 45 * 1000;
+
+// =================================================================
 // NOVO SERVIÇO: GERAÇÃO DE BRAINSTORMING (TOPO DE FUNIL)
 // =================================================================
 exports.generateBrainstorming = async (req, res) => {
@@ -95,18 +112,48 @@ exports.generateBrainstorming = async (req, res) => {
     }
 
     // 1. Chama a API do Gemini Pro
-    // CTO Tip: Removi o "thinkingConfig" aqui e baixei os tokens.
-    // O Brainstorming é topo de funil, precisamos de velocidade (latência baixa) e JSON pequeno.
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: finalPrompt }] }],
-        generationConfig: {
-          maxOutputTokens: 4096, // 4k é mais que suficiente para um JSON com 3 cards
-        }
-      })
-    });
+    //
+    // O comentário que estava aqui dizia que o thinkingConfig tinha sido
+    // REMOVIDO para ganhar velocidade. A premissa é falsa, e é a mesma que
+    // já custou caro duas vezes em 01/09: omitir a chave não desliga o
+    // pensamento, só deixa o modelo rodar no nível padrão dele. Ou seja, o
+    // brainstorming provavelmente pensava MAIS que a troca de atividade,
+    // justamente no topo do funil, onde a latência mais dói.
+    //
+    // Agora está declarado. LOW porque a tarefa é devolver 3 cards curtos,
+    // não planejar uma viagem.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+
+    let geminiResponse;
+    const inicio = Date.now();
+    try {
+      geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: "user", parts: [{ text: finalPrompt }] }],
+          generationConfig: {
+            maxOutputTokens: 4096, // 4k é mais que suficiente para um JSON com 3 cards
+            thinkingConfig: { thinkingLevel: "LOW" }
+          }
+        }),
+        signal: controller.signal,
+      });
+    } catch (erro) {
+      // Sem este teto a chamada ficava pendurada até o Cloud Run cortar - e
+      // quando o Cloud Run corta, ele mata o processo: o catch lá embaixo
+      // não roda e a linha fica presa em 'generating' para sempre. Abortar
+      // aqui dentro é o que garante que a falha vire status 'failed'.
+      if (erro.name === 'AbortError') {
+        throw new Error(`Gemini não respondeu em ${GEMINI_TIMEOUT_MS / 1000}s no brainstorming.`);
+      }
+      throw erro;
+    } finally {
+      clearTimeout(timer);
+    }
+
+    console.log(`[Brainstorming] Gemini respondeu em ${Date.now() - inicio}ms.`);
 
     if (!geminiResponse.ok) {
       const errorText = await geminiResponse.text();
@@ -118,6 +165,19 @@ exports.generateBrainstorming = async (req, res) => {
     // Validação de segurança estrutural
     if (!geminiData.candidates || !geminiData.candidates[0].content) {
       throw new Error("Resposta do Gemini em formato inesperado ou vazia.");
+    }
+
+    // MAX_TOKENS não chega como erro: chega como 200 com o texto cortado no
+    // meio de uma chave, e o JSON.parse lá embaixo falha com "Unexpected end
+    // of JSON input" - que não diz nada sobre a causa. Com 4096 tokens de
+    // saída e thinking ligado, truncar é um desfecho plausível, então vale a
+    // mesma checagem que o generate-trip e o update-memory já fazem.
+    const finishReason = geminiData.candidates[0].finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      throw new Error(
+        `Gemini interrompeu a geração (finishReason: ${finishReason}). ` +
+        `Provável estouro de maxOutputTokens no brainstorming ${sessionId}.`
+      );
     }
 
     let tokenCount = 0;
