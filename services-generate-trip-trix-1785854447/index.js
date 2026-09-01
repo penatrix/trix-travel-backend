@@ -51,20 +51,49 @@ function verifyWebhookSecret(req) {
 // Uma retentativa só, e só em falha de REDE. Erro HTTP (429, 500) já é
 // tratado por quem chama, e repetir uma geração cara às cegas é pior do
 // que falhar rápido.
+//
+// O TETO PRECISA CABER DENTRO DO CLOUD RUN, e antes não cabia: eram 8
+// minutos por tentativa, duas tentativas, 960s - contra o --timeout=900
+// do cloudbuild.yaml deste serviço. Quando o Cloud Run corta, ele mata o
+// processo: o 'catch' lá embaixo NÃO roda, a row fica presa em
+// 'generating' para sempre e a cota fica cobrada sem estorno. É a
+// armadilha "falha de job silenciosa" e a perda de crédito da 242 no
+// mesmo ponto - e a retentativa, que existe justamente por causa da 242,
+// era o que reabria a janela.
+//
+// A conta agora fecha com folga:
+//
+//   2 tentativas x 300s = 600s
+//   + validação de lugares (duas passadas ao Google, 8s por consulta,
+//     concorrência 5: ~105s no pior caso de um roteiro grande)
+//   + escritas no Supabase
+//   = ~750s contra o teto de 900s
+//
+// Se mexer em um dos dois números, refaça a conta. Aumentar este teto
+// sem aumentar o --timeout traz o bug de volta exatamente como estava.
 // =================================================================
-const GEMINI_TIMEOUT_MS = 8 * 60 * 1000;
+const GEMINI_TIMEOUT_MS = 5 * 60 * 1000;
 
 async function fetchGemini(url, body, rotulo) {
   for (let tentativa = 1; tentativa <= 2; tentativa++) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
     try {
-      return await fetch(url, {
+      // Mede quanto a geração leva de fato. Não havia número nenhum aqui:
+      // o teto de 8 minutos tinha sido escolhido no escuro, e sem medida
+      // não dá para saber se 300s é folga ou aperto. Mesmo formato que o
+      // generate-micro-activity já usa.
+      const inicio = Date.now();
+      const resposta = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      console.log(
+        `[Gemini] ${rotulo}: respondeu em ${Date.now() - inicio}ms (tentativa ${tentativa}).`,
+      );
+      return resposta;
     } catch (erro) {
       const motivo = erro.name === 'AbortError'
         ? `timeout de ${GEMINI_TIMEOUT_MS / 1000}s`
