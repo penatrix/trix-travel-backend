@@ -331,7 +331,26 @@ exports.generateTrip = async (req, res) => {
     const budgetActual = tripJsonObject.estimated_cost_brl;
 
     // 3. Sucesso: Atualiza os dados no Supabase para 'ready'
-    const { error: updateError } = await supabase
+    //
+    // O `.eq('status', 'generating')` é o ponto da coisa, não detalhe.
+    //
+    // Existe um job de pg_cron rodando de minuto em minuto que marca como
+    // 'failed' qualquer linha presa em 'generating' há mais de 3 minutos -
+    // e ele passou a ESTORNAR o crédito junto. Ou seja: a partir do
+    // momento em que ele desiste de uma geração, o usuário já recebeu o
+    // dinheiro de volta.
+    //
+    // Sem esta condição, uma geração lenta que terminasse depois disso
+    // sobrescreveria o 'failed' com 'ready' e a pessoa ficaria com o
+    // roteiro E com o crédito: viagem de graça. O caminho de retentativa
+    // chega lá por construção - duas tentativas de 5 minutos passam dos 3
+    // do job.
+    //
+    // Com a condição, quem desistiu primeiro decide. A geração atrasada é
+    // descartada e a pessoa refaz sem custo, porque o crédito já voltou.
+    // O `.select('id')` existe só para saber se pegou: um update que não
+    // casa nenhuma linha não é erro no Supabase, volta vazio em silêncio.
+    const { data: linhasAtualizadas, error: updateError } = await supabase
       .from('trips')
       .update({
         itinerary_json: tripJsonObject,
@@ -340,9 +359,22 @@ exports.generateTrip = async (req, res) => {
         tokens_used: tokenCount,
         budget_actual: budgetActual
       })
-      .eq('id', tripId);
+      .eq('id', tripId)
+      .eq('status', 'generating')
+      .select('id');
 
     if (updateError) throw updateError;
+
+    if (!linhasAtualizadas || linhasAtualizadas.length === 0) {
+      // Não é erro: é o job tendo chegado antes. Nada a estornar aqui, ele
+      // já fez. Só não pode passar batido no log, senão fica parecendo
+      // geração perdida sem explicação.
+      console.log(
+        `[Descartado] Trip ${tripId}: geração terminou mas a linha já não estava em 'generating'. ` +
+        `Provavelmente o job de roteiros travados desistiu antes e já estornou o crédito.`,
+      );
+      return res.status(200).json({ success: true, message: 'Resultado descartado: linha já não estava em generating' });
+    }
 
     return res.status(200).json({ success: true });
 
