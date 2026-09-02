@@ -1,0 +1,21 @@
+# O repositório não tinha .gitignore nenhum, e isso é o que torna a cópia
+# de build abaixo perigosa: uma cópia commitada por engano passaria a
+# sombrear a que o build produz, e voltaríamos à pergunta "qual cópia é a
+# fonte da verdade" - exatamente o que a limpeza de 01/09 matou.
+
+# Cópia produzida no build, nunca commitada.
+#
+# O micro-activity usa a validação de lugares que vive na pasta do
+# generate-trip. Como o contexto do `pack` é a pasta do serviço, nada de
+# fora dela entra na imagem - então o arquivo é copiado por um passo do
+# cloudbuild (id `copia-validacao`) e, localmente, pelo `pretest` do
+# package.json. Os dois copiam da mesma origem, então teste local e
+# runtime concordam.
+services-generate-micro-activity-*/validar-lugares.js
+
+# Impede que node_modules NOVO entre no repositório.
+#
+# Não desfaz o que já está rastreado: o update-memory tem 709 arquivos de
+# node_modules versionados, e tirá-los é uma limpeza à parte, registrada
+# no ROADMAP. Isto só evita a próxima.
+node_modules/

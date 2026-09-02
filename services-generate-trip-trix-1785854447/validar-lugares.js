@@ -456,6 +456,10 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
 module.exports = {
   validarEConsertarRoteiro,
   consultarLugar,
+  // Usado também pelo generate-micro-activity, que recebe este arquivo por
+  // um passo de cópia no cloudbuild dele. Este módulo é autocontido
+  // (nenhum `require`) de propósito - é o que torna a cópia possível.
+  consultarHorarios,
   coletarLugares,
   // Exportados para teste: a lógica de janela é onde mora o risco de falso
   // positivo, e ela precisa ser exercitável sem chamar o Google.

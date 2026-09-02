@@ -2,6 +2,7 @@
   "name": "trix-trip-generator",
   "version": "1.0.0",
   "scripts": {
+    "pretest": "cp ../services-generate-trip-trix-1785854447/validar-lugares.js ./validar-lugares.js",
     "test": "node --test"
   },
   "dependencies": {
