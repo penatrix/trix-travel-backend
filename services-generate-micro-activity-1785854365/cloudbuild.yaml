@@ -54,6 +54,15 @@ steps:
       - ${_SERVICE_NAME}
       - --image=gcr.io/$PROJECT_ID/trix-generate-micro-activity:$COMMIT_SHA
       - --region=${_REGION}
+      # O handler tem orçamento próprio de 50s (TETO_TOTAL_MS), pensado
+      # para caber embaixo dos 60s em que o app aborta. Este teto precisa
+      # ser MAIOR que o nosso, senão quem corta é a plataforma - e
+      # plataforma cortando mata o processo, sem log e sem resposta.
+      #
+      # 90s é folga para os 50s do orçamento mais a serialização da
+      # resposta. Explícito no arquivo, e não só no console, para não
+      # voltar ao padrão de 60s silenciosamente num serviço recriado.
+      - --timeout=90
 
 images:
   - gcr.io/$PROJECT_ID/trix-generate-micro-activity:$COMMIT_SHA
