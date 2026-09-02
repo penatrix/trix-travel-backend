@@ -1,5 +1,8 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
+// Chega aqui por um passo de cópia no cloudbuild (id `copia-validacao`) e,
+// no desenvolvimento local, pelo `pretest` do package.json.
+const { escolherCandidato } = require('./escolher-candidato');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -39,8 +42,6 @@ function verifyWebhookSecret(req) {
   return !!expected && provided === expected;
 }
 
-const { verificarStatus } = require('./verificar-status');
-
 // =================================================================
 // ORÇAMENTO DE TEMPO DO PEDIDO INTEIRO
 //
@@ -48,34 +49,31 @@ const { verificarStatus } = require('./verificar-status');
 // aqui tem que caber embaixo disso, senão quem corta é o cliente e o
 // handler nem chega a dizer o motivo.
 //
-// Antes era simples: uma chamada ao Gemini com teto de 45s, fim. Agora o
-// caminho ruim tem QUATRO etapas - Gemini, Google, Gemini, Google - e
-// somar os tetos individuais dá 45+8+45+8 = 106s, quase o dobro do que o
-// app espera. Teto por etapa não fecha conta; só um orçamento comum
-// fecha.
+// A conta, no pior caso:
 //
-// 50s deixa 10s de margem sob os 60s do app. Cada etapa recebe o que
-// sobra do orçamento, e a segunda tentativa só começa se ainda couber
-// inteira - entregar a sugestão fechada com aviso no log é melhor que
-// estourar o prazo e não entregar nada.
+//   40s  Gemini (uma ida; ~20s medidos)
+// +  8s  Google (o teto de dentro do validar-lugares; os candidatos são
+//        verificados em PARALELO, então são 8s no total, não por candidato)
+// = 48s  contra 60s do app e 90s do Cloud Run
+//
+// Vale registrar o que ESTE desenho evitou. Numa versão anterior, quando
+// a sugestão vinha fechada o handler pedia OUTRA ao Gemini: o caminho
+// ruim tinha quatro etapas - Gemini, Google, Gemini, Google - e somar os
+// tetos dava 45+8+45+8 = 106s, quase o dobro do que o app espera. Pedir
+// os candidatos JUNTOS eliminou a segunda ida, e com ela a aritmética
+// que não fechava. Some-se a isso que o orçamento deixou de precisar ser
+// repartido entre etapas: com uma ida só, o teto do Gemini é o teto.
 // =================================================================
-const TETO_TOTAL_MS = 50000;
-const TETO_GEMINI_MS = 45000;
-const TETO_GOOGLE_MS = 8000;
-
-// Piso para tentar de novo: uma chamada ao Gemini medida gira em torno de
-// 20s. Abaixo disto a segunda tentativa provavelmente seria cortada no
-// meio, gastando token para não entregar nada.
-const MINIMO_PARA_SEGUNDA_MS = 25000;
+const TETO_GEMINI_MS = 40000;
 
 // =================================================================
 // Uma ida ao Gemini: chama, confere, devolve o JSON e a contagem.
 //
-// Virou função porque agora pode acontecer duas vezes no mesmo pedido.
-// Antes estava tudo inline no handler, e duplicar aquilo era pedir para
-// as duas cópias divergirem.
+// É UMA ida por pedido. Ficou como função separada porque o handler já
+// tem trabalho suficiente, e porque isola o que é conversa com o modelo
+// do que é decisão sobre o resultado.
 // =================================================================
-async function pedirSugestao(promptText, tetoMs, rotulo) {
+async function pedirSugestao(promptText, tetoMs) {
   const controlador = new AbortController();
   const alarme = setTimeout(() => controlador.abort(), tetoMs);
   const inicio = Date.now();
@@ -110,10 +108,10 @@ async function pedirSugestao(promptText, tetoMs, rotulo) {
     const geminiData = await geminiResponse.json();
 
     // Latência explícita no log. Sem isto, "está lento" era impressão.
-    console.log(`[MicroActivity] Gemini respondeu em ${Date.now() - inicio}ms (${rotulo}).`);
+    console.log(`[MicroActivity] Gemini respondeu em ${Date.now() - inicio}ms.`);
 
     if (!geminiData.candidates || !geminiData.candidates[0].content) {
-      throw new Error(`Resposta vazia do Gemini (${rotulo}).`);
+      throw new Error('Resposta vazia do Gemini.');
     }
 
     const rawText = geminiData.candidates[0].content.parts[0].text;
@@ -125,7 +123,7 @@ async function pedirSugestao(promptText, tetoMs, rotulo) {
     };
   } catch (erroDaChamada) {
     if (erroDaChamada.name === 'AbortError') {
-      throw new Error(`Gemini nao respondeu em ${Math.round(tetoMs / 1000)}s na troca de atividade (${rotulo}).`);
+      throw new Error(`Gemini nao respondeu em ${Math.round(tetoMs / 1000)}s na troca de atividade.`);
     }
     throw erroDaChamada;
   } finally {
@@ -154,7 +152,11 @@ exports.generateMicroActivity = async (req, res) => {
 
   try {
     // Agora o Cloud Run não pensa, só recebe o prompt pronto do FlutterFlow
-    const { promptText } = req.body;
+    // `period` é OPCIONAL de propósito. Ele só existe no corpo depois que
+    // o app novo subir, e o backend precisa continuar servindo o app
+    // antigo enquanto isso - sem ele a checagem de horário simplesmente
+    // não roda, e a de fechamento continua valendo.
+    const { promptText, period: periodo } = req.body;
 
     if (!promptText) {
       return res.status(400).json({ error: 'O promptText é obrigatório.' });
@@ -162,112 +164,65 @@ exports.generateMicroActivity = async (req, res) => {
 
     console.log(`[MicroActivity] Iniciando requisição para o Gemini...`);
 
-    const prazo = Date.now() + TETO_TOTAL_MS;
-    const restante = () => prazo - Date.now();
-    // Piso de 1s para nenhum alarme disparar no mesmo instante em que é
-    // criado, o que produziria um erro de timeout confuso em vez do erro
-    // real. O portão do MINIMO_PARA_SEGUNDA_MS é que evita chegar aqui
-    // sem tempo.
-    const tetoPara = (maximo) => Math.max(1000, Math.min(maximo, restante()));
+    const { sugestao: bruto, tokens } = await pedirSugestao(promptText, TETO_GEMINI_MS);
 
-    let { sugestao, tokens: tokensTotais } = await pedirSugestao(
-      promptText,
-      tetoPara(TETO_GEMINI_MS),
-      'tentativa 1',
+    // =============================================================
+    // OS CANDIDATOS
+    //
+    // O prompt novo pede uma lista ranqueada de 3. Mas o prompt vive no
+    // CLIENTE, e mudança de prompt do cliente só vale depois de o app
+    // recarregar - e os dois sobem separados. Então este handler aceita
+    // as DUAS formas: a lista nova e o objeto único do app antigo,
+    // tratado como lista de um. Sem isso, subir o backend antes do app
+    // quebraria a troca de atividade para todo mundo.
+    // =============================================================
+    const candidatos = Array.isArray(bruto?.suggestions)
+      ? bruto.suggestions
+      : Array.isArray(bruto)
+        ? bruto
+        : [bruto];
+
+    console.log(
+      `[MicroActivity] ${candidatos.length} candidato(s); periodo: ${periodo || '(nao informado)'}.`,
     );
 
     // =============================================================
-    // VALIDAÇÃO DE LUGAR FECHADO
+    // A ESCOLHA
     //
-    // Toda a proteção contra "o pior bug do produto" vivia só no
-    // caminho da geração inicial (validar-lugares.js, no generate-trip).
-    // A troca de atividade devolvia o JSON do Gemini direto ao app, sem
-    // consultar o Google - ou seja, o buraco ficava exatamente no
-    // caminho que o usuário usa quando NÃO gostou da sugestão validada.
-    // Ele trocava um lugar verificado por um não verificado, e a tela
-    // não distinguia os dois.
-    //
-    // O desenho aqui é pedir outra por conta própria, uma vez só, em vez
-    // de avisar o app: mantém o contrato entre os dois intacto e não
-    // exige mudança no Flutter. O custo é uma segunda chamada ao Gemini,
-    // e só quando a primeira sugestão vem fechada.
+    // Verifica todos em paralelo - status e horário - e fica com o
+    // melhor. É isto que torna a troca rápida: os candidatos já vieram
+    // na mesma resposta, então descartar um fechado não custa outra ida
+    // ao Gemini, só a checagem que já estava acontecendo mesmo.
     // =============================================================
-    const chaveMaps = process.env.GOOGLE_MAPS_KEY;
+    const escolha = await escolherCandidato(
+      candidatos,
+      periodo,
+      process.env.GOOGLE_MAPS_KEY,
+    );
 
-    if (!chaveMaps) {
-      // Mesma postura do validar-lugares: não derruba a entrega. Mas
-      // grita no log, porque serviço recriado sem a chave entrega
-      // sugestão não verificada parecendo verificada.
-      console.warn(
-        '[Places] MicroActivity: GOOGLE_MAPS_KEY ausente. Sugestão entregue SEM verificação de fechamento.',
-      );
-    } else {
-      const veredito = await verificarStatus(
-        sugestao.maps_search_query,
-        chaveMaps,
-        tetoPara(TETO_GOOGLE_MS),
-      );
+    escolha.vereditos.forEach((v, i) => {
+      const marca = i === escolha.indiceEscolhido ? '=>' : '  ';
       console.log(
-        `[Places] MicroActivity: "${sugestao.place}" -> ${veredito.veredito}` +
-        `${veredito.status ? ` (${veredito.status})` : ''}` +
-        `${veredito.motivo ? ` (${veredito.motivo})` : ''}.`,
+        `[Places] MicroActivity ${marca} [${i}] "${v.candidato?.place}": status=${v.status}` +
+        `${v.googleStatus ? ` (${v.googleStatus})` : ''}` +
+        `, horario=${v.horario === null ? 'sem dado' : v.horario}` +
+        `${v.motivo ? ` (${v.motivo})` : ''}`,
       );
+    });
 
-      // Só 'fechado' descarta. 'nao_encontrado' e 'erro' entregam a
-      // sugestão: falso positivo aqui custaria uma espera inteira ao
-      // usuário para trocar um lugar que talvez estivesse ótimo.
-      if (veredito.veredito === 'fechado') {
-        if (restante() < MINIMO_PARA_SEGUNDA_MS) {
-          console.warn(
-            `[Places] MicroActivity: sobraram ${restante()}ms, não dá para pedir outra. ` +
-            `Entregando "${sugestao.place}" mesmo fechado.`,
-          );
-        } else {
-          // O veto vai em INGLÊS de propósito, e isso não é o bug de
-          // mistura de idiomas: o buildMicroActivityPrompt escreve todas
-          // as instruções em inglês e manda traduzir apenas os VALORES
-          // de saída ("LANGUAGE: Your output values MUST be exclusively
-          // in $targetLanguage"). Instrução nova em inglês é coerente
-          // com o resto do prompt.
-          const promptComVeto = promptText +
-            `\n\n  CLOSED PLACE VETO (added by server-side validation): "${sugestao.place}" ` +
-            `is reported as ${veredito.status} on Google Maps. Do NOT suggest it. ` +
-            `Suggest a DIFFERENT place that is currently open.`;
-
-          const segunda = await pedirSugestao(
-            promptComVeto,
-            tetoPara(TETO_GEMINI_MS),
-            'tentativa 2, apos fechado',
-          );
-          tokensTotais += segunda.tokens;
-
-          const veredito2 = await verificarStatus(
-            segunda.sugestao.maps_search_query,
-            chaveMaps,
-            tetoPara(TETO_GOOGLE_MS),
-          );
-          console.log(
-            `[Places] MicroActivity: substituto "${segunda.sugestao.place}" -> ${veredito2.veredito}.`,
-          );
-
-          // Duas fechadas seguidas é raro e não vale uma terceira ida:
-          // gastaria mais token e estouraria o prazo do app. Entrega a
-          // segunda e registra, para o número existir.
-          if (veredito2.veredito === 'fechado') {
-            console.warn(
-              `[Places] MicroActivity: as duas sugestões vieram fechadas. ` +
-              `Entregando "${segunda.sugestao.place}".`,
-            );
-          }
-
-          sugestao = segunda.sugestao;
-        }
-      }
+    // Degradado é o que precisa gritar: significa que nenhum candidato
+    // passou limpo. É também o número que dirá se três estão bastando.
+    if (escolha.degradado) {
+      console.warn(`[Places] MicroActivity: ${escolha.motivo}.`);
+    } else {
+      console.log(`[Places] MicroActivity: ${escolha.motivo}.`);
     }
 
-    console.log(`[Analytics] MicroActivity gerada. Tokens: ${tokensTotais}`);
+    console.log(`[Analytics] MicroActivity gerada. Tokens: ${tokens}`);
 
-    return res.status(200).json(sugestao);
+    // Devolve UM objeto, exatamente como sempre devolveu. O app não muda
+    // para receber - só o prompt muda, para produzir três.
+    return res.status(200).json(escolha.escolhido);
 
   } catch (error) {
     console.error(`[CRÍTICO] Erro na MicroActivity:`, error.message);
