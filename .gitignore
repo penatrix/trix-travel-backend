@@ -5,13 +5,20 @@
 
 # Cópia produzida no build, nunca commitada.
 #
-# O micro-activity usa a validação de lugares que vive na pasta do
-# generate-trip. Como o contexto do `pack` é a pasta do serviço, nada de
+# O `validar-lugares.js` vive na pasta do generate-trip e é consumido por
+# outros serviços. Como o contexto do `pack` é a pasta do serviço, nada de
 # fora dela entra na imagem - então o arquivo é copiado por um passo do
 # cloudbuild (id `copia-validacao`) e, localmente, pelo `pretest` do
-# package.json. Os dois copiam da mesma origem, então teste local e
-# runtime concordam.
-services-generate-micro-activity-*/validar-lugares.js
+# package.json. Os dois copiam da mesma origem, então teste local e runtime
+# concordam.
+#
+# O padrão é genérico e a ORIGEM é a exceção. Antes ele nomeava só a pasta
+# do micro-activity, e quando o classify-conflicts passou a consumir o
+# módulo a cópia dele ficou fora do ignore - commitável por acidente, que é
+# exatamente o que este arquivo existe para impedir. Genérico se mantém
+# sozinho no próximo consumidor.
+*/validar-lugares.js
+!services-generate-trip-trix-*/validar-lugares.js
 
 # Impede que node_modules NOVO entre no repositório.
 #

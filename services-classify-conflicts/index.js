@@ -1,5 +1,9 @@
 const jwt = require('jsonwebtoken');
 const { montarPrompt, conferirResposta } = require('./classificar');
+// `validar-lugares` chega aqui por um passo de cópia no cloudbuild (id
+// `copia-validacao`) e, no desenvolvimento local, pelo `pretest`. É o mesmo
+// arquivo que o generate-trip e o generate-micro-activity usam.
+const { avaliarDisponibilidades } = require('./disponibilidade');
 
 // Este serviço NÃO fala com o Supabase, e é o primeiro que não fala.
 //
@@ -55,6 +59,14 @@ const TETO_GEMINI_MS = 30000;
 // protege a ENTRADA.
 const MAX_ITENS = 80;
 
+// Teto de itens VALIDADOS no Google por chamada.
+//
+// Separado do MAX_ITENS porque protege outra coisa: aquele protege o
+// tamanho do prompt, este protege a conta do Google. O app manda
+// `maps_search_query` só para os backups (as atividades já foram validadas
+// na geração), e backups são ~2 por destino — então 20 é folgado.
+const MAX_VALIDACOES = 20;
+
 // =================================================================
 // SERVIÇO: CLASSIFICA CONFLITO DE RESTRIÇÃO
 //
@@ -106,6 +118,12 @@ exports.classifyConflicts = async (req, res) => {
         id: String(i?.id ?? '').trim(),
         place: String(i?.place ?? '').trim(),
         description: String(i?.description ?? '').trim(),
+        // Opcionais, e é a presença deles que pede validação no Google. O
+        // app manda só para os backups: as atividades já foram validadas na
+        // geração do roteiro, e revalidar tudo dobraria a conta sem
+        // responder nada novo.
+        maps_search_query: String(i?.maps_search_query ?? '').trim(),
+        period: String(i?.period ?? '').trim(),
       }))
       .filter((i) => i.id && i.place);
 
@@ -113,42 +131,54 @@ exports.classifyConflicts = async (req, res) => {
       return res.status(400).json({ error: 'nenhum item com id e place utilizáveis.' });
     }
 
+    const paraValidar = itens
+      .filter((i) => i.maps_search_query)
+      .slice(0, MAX_VALIDACOES);
+
     console.log(
-      `[Conflitos] Classificando ${itens.length} item(ns) contra "${restriction}".`,
+      `[Conflitos] Classificando ${itens.length} item(ns) contra "${restriction}"` +
+      `${paraValidar.length ? `; validando ${paraValidar.length} no Google` : ''}.`,
     );
 
-    const resposta = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: montarPrompt(restriction, itens) }] }],
-          generationConfig: {
-            maxOutputTokens: 2048,
-            // Determinismo importa: a mesma lista com a mesma restrição
-            // deve dar o mesmo veredito. Classificação não é lugar para
-            // criatividade.
-            temperature: 0.1,
-            // Pro, e não Flash, apesar de ser classificação curta.
-            //
-            // O CLAUDE.md reserva o Flash para um lugar só - a destilação
-            // da memória - e essa regra fica intacta. A escolha aqui é de
-            // consequência: errar significa um celíaco MANTER um jantar
-            // com glúten. É UMA chamada por emenda, não uma por
-            // atividade, então a diferença de custo é irrelevante e a de
-            // risco não é.
-            //
-            // LOW porque a tarefa é reconhecer categoria de lugar, não
-            // raciocinar longo. E declarado explicitamente porque omitir
-            // não desliga: sem a chave, o modelo roda no nível padrão
-            // dele e gasta pensamento que a resposta não usa.
-            thinkingConfig: { thinkingLevel: 'LOW' },
-          },
-        }),
-        signal: controlador.signal,
-      },
-    );
+    // As duas perguntas em PARALELO, porque são independentes: o Gemini
+    // decide se o lugar conflita com o pedido, o Google decide se ele está
+    // aberto. Sequencial somaria os dois tempos sem motivo — mesma razão
+    // pela qual a escolha de candidato na troca de atividade é paralela.
+    const [resposta, disponibilidade] = await Promise.all([
+      fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ role: 'user', parts: [{ text: montarPrompt(restriction, itens) }] }],
+            generationConfig: {
+              maxOutputTokens: 2048,
+              // Determinismo importa: a mesma lista com a mesma restrição
+              // deve dar o mesmo veredito. Classificação não é lugar para
+              // criatividade.
+              temperature: 0.1,
+              // Pro, e não Flash, apesar de ser classificação curta.
+              //
+              // O CLAUDE.md reserva o Flash para um lugar só - a destilação
+              // da memória - e essa regra fica intacta. A escolha aqui é de
+              // consequência: errar significa um celíaco MANTER um jantar
+              // com glúten. É UMA chamada por emenda, não uma por
+              // atividade, então a diferença de custo é irrelevante e a de
+              // risco não é.
+              //
+              // LOW porque a tarefa é reconhecer categoria de lugar, não
+              // raciocinar longo. E declarado explicitamente porque omitir
+              // não desliga: sem a chave, o modelo roda no nível padrão
+              // dele e gasta pensamento que a resposta não usa.
+              thinkingConfig: { thinkingLevel: 'LOW' },
+            },
+          }),
+          signal: controlador.signal,
+        },
+      ),
+      avaliarDisponibilidades(paraValidar, process.env.GOOGLE_MAPS_KEY),
+    ]);
 
     if (!resposta.ok) {
       const texto = await resposta.text();
@@ -192,7 +222,23 @@ exports.classifyConflicts = async (req, res) => {
     );
     conflitos.forEach((c) => console.log(`[Conflitos]   ${c.id}: ${c.reason}`));
 
-    return res.status(200).json({ conflicts: conflitos, tokens });
+    // O veredito do Google, item por item. Backup fechado ou fora do
+    // período aparece aqui, e é o que impede a emenda de trocar um problema
+    // por outro — antes ela escolhia backup só por não conflitar.
+    disponibilidade.forEach((d) =>
+      console.log(
+        `[Disponibilidade] ${d.id}: status=${d.status}` +
+        `${d.google_status ? ` (${d.google_status})` : ''}` +
+        `, horario=${d.hours_ok === null ? 'sem dado' : d.hours_ok}` +
+        `${d.motivo ? ` (${d.motivo})` : ''}`,
+      ),
+    );
+
+    return res.status(200).json({
+      conflicts: conflitos,
+      availability: disponibilidade,
+      tokens,
+    });
   } catch (erro) {
     if (erro.name === 'AbortError') {
       const msg = `Gemini nao respondeu em ${Math.round(TETO_GEMINI_MS / 1000)}s na classificacao de conflitos.`;
