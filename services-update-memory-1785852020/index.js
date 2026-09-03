@@ -244,12 +244,16 @@ exports.updateTravelerMemory = async (req, res) => {
 
     if (fetchError) throw new Error(`Erro ao buscar usuário no Supabase: ${fetchError.message}`);
 
-    // Prepara o DNA atual (cria o esqueleto base se vier vazio/null por algum motivo)
-    let currentDna = userData.travel_dna || {
-      likes: [], dislikes: [], dietary: [], pacing: "", budget_level: "", travel_style: []
-    };
+    // O DNA atual serve para UMA coisa: ler os pesos de onde partir. Não é
+    // mais mutado nem regravado - quem grava é `merge_travel_dna`, mais
+    // abaixo, e só as chaves que esta função possui.
+    //
+    // `pesosAtuais` aceita as duas formas: `tag_weights`, quando existe, ou
+    // as listas `likes`/`dislikes` das contas anteriores à migração de
+    // peso. O esqueleto vazio cobre DNA nulo, que é conta nova.
+    const dnaAtual = userData.travel_dna || { likes: [], dislikes: [] };
 
-    const pesos = pesosAtuais(currentDna);
+    const pesos = pesosAtuais(dnaAtual);
     const antes = { ...pesos };
 
     // +1 por sinal de gosto, -1 por sinal de rejeição. Quando a MESMA tag
@@ -264,15 +268,46 @@ exports.updateTravelerMemory = async (req, res) => {
     }
 
     const derivado = derivarListas(pesos);
-    currentDna.tag_weights = derivado.tag_weights;
-    currentDna.likes = derivado.likes;
-    currentDna.dislikes = derivado.dislikes;
 
-    // Salva o DNA atualizado no banco
-    const { error: updateError } = await supabase
-      .from('users')
-      .update({ travel_dna: currentDna })
-      .eq('id', user_id);
+    // =================================================================
+    // GRAVA SÓ O QUE ESTA FUNÇÃO POSSUI
+    //
+    // Antes isto era `update({ travel_dna: currentDna })`: um
+    // read-modify-write do objeto INTEIRO, sem controle de concorrência.
+    //
+    // O problema não era o que ele escrevia, era o que ele levava junto.
+    // `travel_dna` também guarda `dietary`, a restrição alimentar - dado
+    // sensível de saúde, que o usuário afirma ativamente na tela de perfil
+    // e que por LGPD nunca pode ser inferida. A destilação não a
+    // PREENCHIA, mas podia APAGÁ-LA: se o usuário salvasse a restrição
+    // dentro da janela entre a leitura acima e a gravação aqui, esta
+    // gravação punha a cópia velha por cima. Silenciosamente.
+    //
+    // A tela de perfil já estava endurecida contra isso - relê o DNA
+    // fresco antes de gravar e preserva as outras chaves por spread. Este
+    // lado não estava, e é o que roda a cada troca de atividade.
+    //
+    // `merge_travel_dna` faz o merge no SERVIDOR, com o operador `||` de
+    // jsonb: as chaves do patch sobrescrevem, todas as outras ficam, numa
+    // instrução só. Não há mais janela, e a função RECUSA um patch que
+    // contenha `dietary` - então inferência não pode tocar dado declarado
+    // por construção, não por vigilância de quem editar isto depois.
+    //
+    // O que fica de fora, e é de menor consequência: dois swaps
+    // simultâneos ainda podem perder um incremento de peso um do outro,
+    // porque o +1/-1 é calculado aqui e não no banco. É sinal de gosto,
+    // não de saúde, e é anterior a esta mudança.
+    // =================================================================
+    const patch = {
+      tag_weights: derivado.tag_weights,
+      likes: derivado.likes,
+      dislikes: derivado.dislikes,
+    };
+
+    const { data: dnaGravado, error: updateError } = await supabase.rpc(
+      'merge_travel_dna',
+      { p_user_id: user_id, p_patch: patch },
+    );
 
     if (updateError) throw new Error(`Erro ao atualizar Supabase: ${updateError.message}`);
 
@@ -292,7 +327,10 @@ exports.updateTravelerMemory = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: 'Memória atualizada e mesclada com sucesso',
-      updated_dna: currentDna
+      // O que o BANCO tem depois do merge, não o que este processo montou.
+      // São coisas diferentes agora: o patch não carrega as chaves
+      // declaradas, e é a função que decide o resultado.
+      updated_dna: dnaGravado
     });
 
   } catch (error) {
