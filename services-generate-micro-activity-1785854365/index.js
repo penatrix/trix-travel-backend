@@ -45,16 +45,29 @@ function verifyWebhookSecret(req) {
 // =================================================================
 // ORÇAMENTO DE TEMPO DO PEDIDO INTEIRO
 //
-// O app aborta em 60s (trip_details_widget.dart). Tudo o que acontece
+// O app aborta em 65s (trip_details_widget.dart). Tudo o que acontece
 // aqui tem que caber embaixo disso, senão quem corta é o cliente e o
 // handler nem chega a dizer o motivo.
 //
 // A conta, no pior caso:
 //
-//   40s  Gemini (uma ida; ~20s medidos)
+//   50s  Gemini (uma ida; 14,2s e ~18s medidos em 03/09)
 // +  8s  Google (o teto de dentro do validar-lugares; os candidatos são
 //        verificados em PARALELO, então são 8s no total, não por candidato)
-// = 48s  contra 60s do app e 90s do Cloud Run
+// = 58s  contra 65s do app e 90s do Cloud Run
+//
+// Por que 50 e não 40. O teto foi 45s até 02/09, escolhido contra
+// comportamento observado; virou 40s quando este orçamento foi
+// simplificado, porque 40 + 8 = 48 fechava redondo contra os 60s que o
+// app esperava então. Isso era estética, não medição - e em 03/09 uma de
+// três trocas estourou os 40s, com a repetição imediata voltando em ~18s.
+// O Gemini Pro tem variância larga (a geração de roteiro já mediu 70,5s
+// numa chamada), então o teto tem que cobrir a cauda, não a mediana.
+//
+// Se `nao respondeu em 50s` voltar a aparecer no log, o próximo passo NÃO
+// é aumentar de novo: é aceitar que existe cauda longa e decidir o que
+// mostrar a quem caiu nela. A essa altura o usuário já esperou demais de
+// qualquer forma.
 //
 // Vale registrar o que ESTE desenho evitou. Numa versão anterior, quando
 // a sugestão vinha fechada o handler pedia OUTRA ao Gemini: o caminho
@@ -64,7 +77,7 @@ function verifyWebhookSecret(req) {
 // que não fechava. Some-se a isso que o orçamento deixou de precisar ser
 // repartido entre etapas: com uma ida só, o teto do Gemini é o teto.
 // =================================================================
-const TETO_GEMINI_MS = 40000;
+const TETO_GEMINI_MS = 50000;
 
 // =================================================================
 // Uma ida ao Gemini: chama, confere, devolve o JSON e a contagem.
