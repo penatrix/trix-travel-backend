@@ -94,6 +94,37 @@ function abreNaJanela(periods, diaDaSemana, janela) {
 
 /// Busca os horários pelo place_id que a consulta de status já resolveu.
 /// fields=opening_hours mantém resposta e custo no mínimo.
+/// O lugar abre neste período em ALGUM dia da semana?
+///
+/// A checagem de horário SEM DATA. `abreNaJanela` precisa saber o dia da
+/// semana; esta não - ela pergunta se existe algum dia em que o lugar abre
+/// naquele turno.
+///
+/// É o que serve para quem não tem data em mão: a troca de atividade (que
+/// recebe só o período) e a validação de um backup (que ainda não sabe em
+/// que dia vai cair). Pega o caso comum - o restaurante que só serve almoço
+/// num slot de jantar - e não pega "fecha às segundas", que exigiria a data.
+///
+/// Devolve true, false ou null - e null NÃO é fechado. Praça, mirante e
+/// praia não têm horário cadastrado, e reprovar por ausência de dado
+/// descartaria sugestão boa.
+///
+/// Vive AQUI, e não em quem usa, porque a lógica de janela é onde mora o
+/// risco de falso positivo. Duas cópias dela seria pedir para divergirem -
+/// e este módulo já é o lugar compartilhado, copiado para os serviços que
+/// precisam dele.
+function abreNoPeriodoEmAlgumDia(periods, janela) {
+  if (!Array.isArray(periods) || periods.length === 0) return null;
+
+  let houveResposta = false;
+  for (let dia = 0; dia <= 6; dia += 1) {
+    const r = abreNaJanela(periods, dia, janela);
+    if (r === true) return true;
+    if (r === false) houveResposta = true;
+  }
+  return houveResposta ? false : null;
+}
+
 // =====================================================================
 // REORDENAR DENTRO DO DIA, EM VEZ DE GASTAR BACKUP
 //
@@ -604,6 +635,9 @@ module.exports = {
   // Exportados para teste: a lógica de janela é onde mora o risco de falso
   // positivo, e ela precisa ser exercitável sem chamar o Google.
   abreNaJanela,
+  // A checagem sem data, usada por quem só tem o período em mão: a troca
+  // de atividade e a validação de backup na emenda de roteiro.
+  abreNoPeriodoEmAlgumDia,
   normalizarPeriodo,
   diaDaSemanaDoDia,
   JANELAS,

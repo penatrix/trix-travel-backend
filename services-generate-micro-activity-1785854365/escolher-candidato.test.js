@@ -13,11 +13,10 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 
-const {
-  escolherCandidato,
-  abreNoPeriodoEmAlgumDia,
-  penalidade,
-} = require('./escolher-candidato');
+const { escolherCandidato, penalidade } = require('./escolher-candidato');
+// A checagem de horário mudou de casa: vive no módulo compartilhado, porque
+// a emenda de roteiro passou a precisar dela também.
+const { abreNoPeriodoEmAlgumDia } = require('./validar-lugares');
 
 const CHAVE = 'chave-de-teste';
 

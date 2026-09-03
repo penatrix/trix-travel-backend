@@ -24,10 +24,16 @@
 # precisa existir no Cloud Run antes do primeiro build. Uma vez só, à mão.
 # Depois disso o gatilho cuida.
 #
-# As variáveis de ambiente que ele precisa são só duas - não fala com o
-# Supabase, então não precisa de SUPABASE_URL nem de service role key:
+# As variáveis de ambiente que ele precisa - continua sem falar com o
+# Supabase, então segue sem SUPABASE_URL e sem service role key:
 #   SUPABASE_JWT_SECRET   para validar o token do app
 #   GEMINI_API_KEY        para a chamada ao modelo
+#   GOOGLE_MAPS_KEY       para validar aberto/horário dos backups
+#
+# A GOOGLE_MAPS_KEY foi ACRESCENTADA depois da criação do serviço. Sem ela
+# a classificação continua funcionando, mas a validação devolve
+# `status: 'erro'` para todo item - e aí a emenda volta a escolher backup
+# sem saber se está aberto, que é o problema que isto veio resolver.
 # =====================================================================
 
 substitutions:
@@ -36,6 +42,21 @@ substitutions:
   _REGION: europe-west1
 
 steps:
+  # O validar-lugares.js vive na pasta do generate-trip e é usado por três
+  # serviços agora. Como o contexto do `pack` é a pasta do serviço
+  # (`--path=.`), nada de fora dela entra na imagem - então o arquivo é
+  # copiado para cá ANTES do build. Sem este passo o build passa e a revisão
+  # quebra em runtime, no require.
+  #
+  # Mesma origem que o `pretest` do package.json usa, então teste local e
+  # runtime concordam. A cópia nunca é commitada (está no .gitignore).
+  - id: copia-validacao
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/validar-lugares.js
+      - services-classify-conflicts/validar-lugares.js
+
   - id: build
     name: gcr.io/k8s-skaffold/pack
     dir: services-classify-conflicts

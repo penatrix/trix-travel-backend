@@ -32,39 +32,24 @@
 const {
   consultarLugar,
   consultarHorarios,
-  abreNaJanela,
+  abreNoPeriodoEmAlgumDia,
   normalizarPeriodo,
   JANELAS,
 } = require('./validar-lugares');
 
 // =====================================================================
-// NÍVEL 1 DA CHECAGEM DE HORÁRIO: sem precisar da data
+// A CHECAGEM DE HORÁRIO VIVE NO MÓDULO COMPARTILHADO
 //
-// Horário de funcionamento é por dia da semana, e este serviço não sabe
-// a data daquele dia do roteiro - ele só recebe o período. Mas a
-// pergunta "este lugar abre à noite em ALGUM dia?" não precisa de data,
-// e é ela que pega o caso comum: o restaurante que só serve almoço num
-// slot de jantar, que é o defeito registrado no ROADMAP.
+// `abreNoPeriodoEmAlgumDia` era definida aqui. Mudou para o
+// `validar-lugares`, que é o arquivo que este serviço já recebe por cópia
+// de build — porque a emenda de roteiro passou a precisar da mesma
+// checagem para validar backup, e a lógica de janela é onde mora o risco
+// de falso positivo. Duas cópias dela seria pedir para divergirem.
 //
-// O que este nível NÃO pega: "fecha às segundas". Para isso é preciso a
-// data do dia, o que exigiria o app mandá-la. Decidido ficar de fora
-// desta rodada.
-//
-// Devolve true, false ou null - e null NÃO é fechado. Praça, mirante e
-// praia não têm horário cadastrado, e reprovar por ausência de dado
-// descartaria sugestão boa.
+// O que ela responde: "abre neste período em ALGUM dia?". Não precisa de
+// data, e é isso que a torna útil aqui — este serviço recebe o período, não
+// o dia. O que ela não pega é "fecha às segundas".
 // =====================================================================
-function abreNoPeriodoEmAlgumDia(periods, janela) {
-  if (!Array.isArray(periods) || periods.length === 0) return null;
-
-  let houveResposta = false;
-  for (let dia = 0; dia <= 6; dia += 1) {
-    const r = abreNaJanela(periods, dia, janela);
-    if (r === true) return true;
-    if (r === false) houveResposta = true;
-  }
-  return houveResposta ? false : null;
-}
 
 /// Avalia um candidato. NUNCA lança: qualquer falha vira veredito de
 /// "não deu para verificar", e a escolha lida com isso.
@@ -172,6 +157,5 @@ async function escolherCandidato(candidatos, periodoBruto, apiKey) {
 module.exports = {
   escolherCandidato,
   avaliarCandidato,
-  abreNoPeriodoEmAlgumDia,
   penalidade,
 };
