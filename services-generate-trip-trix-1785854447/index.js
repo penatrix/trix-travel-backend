@@ -321,7 +321,9 @@ exports.generateTrip = async (req, res) => {
     console.log(
       `[Horários] Trip ${tripId}: ${resumoLugares.horarios_verificados} verificados, ` +
       `${resumoLugares.fora_do_horario} fora do período, ` +
-      `${resumoLugares.trocados_por_horario} trocados.`,
+      `${resumoLugares.reordenados} reordenados, ` +
+      `${resumoLugares.trocados_por_horario} trocados, ` +
+      `${resumoLugares.mantidos_fora_do_horario} com aviso na tela.`,
     );
     resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
 

@@ -94,6 +94,101 @@ function abreNaJanela(periods, diaDaSemana, janela) {
 
 /// Busca os horários pelo place_id que a consulta de status já resolveu.
 /// fields=opening_hours mantém resposta e custo no mínimo.
+// =====================================================================
+// REORDENAR DENTRO DO DIA, EM VEZ DE GASTAR BACKUP
+//
+// O defeito: o modelo põe restaurante que só serve almoço num slot de
+// jantar. A correção antiga era trocar o LUGAR por um backup - e a viagem
+// 252 mostrou que é isso que esvazia o banco: `0 fechados` e `5 fora do
+// período`, com Foz do Iguaçu gastando os dois backups e ainda entregando
+// dois jantares impossíveis.
+//
+// Só que quase sempre não falta lugar: falta ORDEM. Se o restaurante de
+// almoço está à noite e há uma atividade de tarde no mesmo dia, as duas
+// trocando de slot resolve sem gastar backup, sem chamar API e sem
+// inventar lugar nenhum.
+//
+// As duas condições são deliberadamente assimétricas:
+//
+//   - quem está errado precisa ABRIR no período novo, verificado (`true`).
+//     "Sem dado" não serve: trocar um problema conhecido por um
+//     desconhecido não é conserto.
+//   - quem cede o slot só não pode QUEBRAR nele (`!== false`). Aqui "sem
+//     dado" passa, e é isso que faz a troca funcionar no caso comum:
+//     praça, mirante, praia e mercado a céu aberto não têm horário
+//     cadastrado, então recebem qualquer período.
+//
+// Custo conhecido: o texto de `logistics` do lugar que se mudou pode
+// citar horário ("vá no fim do dia"). Reescrever exigiria nova chamada ao
+// modelo, o que é justamente o que esta função existe para evitar.
+// =====================================================================
+
+/// Distância entre períodos, em slots. Serve para preferir a troca mais
+/// curta: mandar o almoço para a tarde estranha menos que para a manhã, e
+/// é onde o texto de logística tem mais chance de continuar valendo.
+const ORDEM_DOS_PERIODOS = ['manha', 'tarde', 'noite'];
+
+function distanciaEntrePeriodos(a, b) {
+  const ia = ORDEM_DOS_PERIODOS.indexOf(normalizarPeriodo(a));
+  const ib = ORDEM_DOS_PERIODOS.indexOf(normalizarPeriodo(b));
+  if (ia < 0 || ib < 0) return 99;
+  return Math.abs(ia - ib);
+}
+
+/// Procura, no MESMO dia, com quem a atividade do índice `i` pode trocar
+/// de slot. Devolve o índice da parceira, ou -1.
+///
+/// `abreNoPeriodo(obj, periodoBruto)` -> true / false / null
+/// `elegivel(obj)` -> false para quem já está condenado (lugar fechado
+/// sai ou é substituído logo abaixo; trocar de slot com ele só mudaria o
+/// período do buraco).
+function acharTrocaDePeriodo(atividades, i, { abreNoPeriodo, elegivel }) {
+  const atv = atividades[i];
+  const periodoAtual = normalizarPeriodo(atv?.period);
+  if (!periodoAtual) return -1;
+
+  const candidatos = [];
+  for (let j = 0; j < atividades.length; j += 1) {
+    if (j === i) continue;
+    const outra = atividades[j];
+    const periodoOutra = normalizarPeriodo(outra?.period);
+    if (!periodoOutra || periodoOutra === periodoAtual) continue;
+    if (!elegivel(outra)) continue;
+    if (abreNoPeriodo(atv, outra.period) !== true) continue;
+    if (abreNoPeriodo(outra, atv.period) === false) continue;
+    candidatos.push(j);
+  }
+
+  if (!candidatos.length) return -1;
+
+  candidatos.sort(
+    (x, y) =>
+      distanciaEntrePeriodos(atividades[x].period, periodoAtual) -
+      distanciaEntrePeriodos(atividades[y].period, periodoAtual),
+  );
+  return candidatos[0];
+}
+
+/// Troca duas atividades de slot, no lugar.
+///
+/// Cada SLOT mantém o período dele; quem muda de lugar são as atividades.
+/// Por isso o period é trocado E as posições também: a ordem do array é a
+/// ordem em que o dia aparece na tela, então ela precisa continuar
+/// casando com os períodos - senão o usuário vê noite antes de tarde.
+///
+/// Muta os objetos em vez de clonar, de propósito: `lugares` e o mapa de
+/// horários são indexados pela IDENTIDADE destes objetos, e um clone
+/// perderia os dois.
+function trocarDeSlot(atividades, i, j) {
+  const p = atividades[i].period;
+  atividades[i].period = atividades[j].period;
+  atividades[j].period = p;
+
+  const t = atividades[i];
+  atividades[i] = atividades[j];
+  atividades[j] = t;
+}
+
 async function consultarHorarios(placeId, apiKey) {
   const url =
     'https://maps.googleapis.com/maps/api/place/details/json' +
@@ -246,7 +341,9 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
     removidos: 0,
     horarios_verificados: 0,
     fora_do_horario: 0,
+    reordenados: 0,
     trocados_por_horario: 0,
+    mantidos_fora_do_horario: 0,
     deltaCusto: 0,
     custoAjustado: null,
     detalhes: [],
@@ -374,6 +471,38 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
           ? `${atv.place} (${reg.veredito.status})`
           : `${atv.place} não abre no período ${atv.period}`;
 
+        // ---- 4a. Antes de gastar backup: dá para reordenar o dia? ----
+        //
+        // Só vale para período errado. Lugar FECHADO não se reordena: ele
+        // não pode ficar no roteiro em período nenhum.
+        //
+        // Esta é a saída mais barata que existe - nenhuma chamada de API,
+        // nenhum token, nenhum lugar novo. E é a que o log da viagem 252
+        // pedia: lá o problema nunca foi falta de lugar, foi ordem.
+        if (foraDoHorario) {
+          const j = acharTrocaDePeriodo(atividades, i, {
+            abreNoPeriodo: (obj, periodoBruto) =>
+              abreNoPeriodo(obj, dia, periodoBruto),
+            elegivel: (obj) => {
+              const r = lugares.find(
+                (l) => l.tipo === 'atividade' && l.obj === obj,
+              );
+              return !r || r.veredito.veredito !== 'fechado';
+            },
+          });
+
+          if (j !== -1) {
+            const parceira = atividades[j];
+            resumo.detalhes.push(
+              `${rotulo} -> reordenado: trocou de slot com ${parceira.place} ` +
+              `(${parceira.period})`,
+            );
+            trocarDeSlot(atividades, i, j);
+            resumo.reordenados += 1;
+            continue;
+          }
+        }
+
         // O substituto precisa passar nos DOIS critérios de uma vez: aberto
         // (já garantido pelo banco) E compatível com o período do slot.
         const idx = banco.findIndex(
@@ -389,8 +518,19 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
             resumo.removidos += 1;
             resumo.deltaCusto -= custoSaiu;
           } else {
-            // Período errado é ruim; buraco no dia é pior.
-            resumo.detalhes.push(`${rotulo} -> mantido, sem backup compatível`);
+            // Período errado é ruim; buraco no dia é pior. Mas até aqui o
+            // usuário recebia o jantar impossível sem aviso nenhum - o
+            // problema existia só no log do Cloud Run.
+            //
+            // Esta flag é o que leva o aviso à tela. É um BOOLEANO, não uma
+            // frase: a copy é pt-BR e mora no app, onde a Lais pode trocar
+            // sem mexer em backend. E a chave segue o schema do roteiro,
+            // que é em inglês.
+            atv.hours_mismatch = true;
+            resumo.mantidos_fora_do_horario += 1;
+            resumo.detalhes.push(
+              `${rotulo} -> mantido COM AVISO NA TELA, sem backup nem troca de slot`,
+            );
           }
           continue;
         }
@@ -467,4 +607,11 @@ module.exports = {
   normalizarPeriodo,
   diaDaSemanaDoDia,
   JANELAS,
+  // A reordenação é pura de propósito: recebe predicados em vez de falar
+  // com o Google, e é por isso que dá para exercitar a regra assimétrica
+  // (`=== true` para quem se muda, `!== false` para quem cede o slot) sem
+  // rede nenhuma.
+  acharTrocaDePeriodo,
+  trocarDeSlot,
+  distanciaEntrePeriodos,
 };
