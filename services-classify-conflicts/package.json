@@ -1,0 +1,10 @@
+{
+  "name": "trix-classify-conflicts",
+  "version": "1.0.0",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
+  }
+}

@@ -1,0 +1,77 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras cinco pastas. Duas coisas que não se deduzem
+# olhando, e que já custaram dias de código antigo servindo em produção:
+#
+# O `dir:` no passo de build é obrigatório: no modo "arquivo de
+# configuração", os passos rodam a partir da RAIZ do repositório, não da
+# pasta do serviço.
+#
+# GOOGLE_FUNCTION_TARGET é obrigatório no build: estes serviços são Cloud
+# Run *functions*, e o package.json não tem main nem scripts.start - quem
+# instala o functions-framework e define o entrypoint do container é o
+# buildpack, e só quando recebe essa variável. Sem ela o build passa mas a
+# revisão não sobe ("Creating Revision... failed").
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região. Isso é de propósito no repositório: erra
+# alto em vez de criar um serviço duplicado em silêncio.
+#
+# Consequência para ESTE serviço, que é novo: o `classify-conflicts`
+# precisa existir no Cloud Run antes do primeiro build. Uma vez só, à mão.
+# Depois disso o gatilho cuida.
+#
+# As variáveis de ambiente que ele precisa são só duas - não fala com o
+# Supabase, então não precisa de SUPABASE_URL nem de service role key:
+#   SUPABASE_JWT_SECRET   para validar o token do app
+#   GEMINI_API_KEY        para a chamada ao modelo
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: classifyConflicts
+  _SERVICE_NAME: classify-conflicts
+  _REGION: europe-west1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-classify-conflicts
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-classify-conflicts:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-classify-conflicts:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-classify-conflicts:$COMMIT_SHA
+      - --region=${_REGION}
+      # O handler gasta no pior caso 30s (uma ida ao Gemini, saída curta).
+      # Este teto precisa ser MAIOR que o dele, senão quem corta é a
+      # plataforma - e plataforma cortando mata o processo, sem log e sem
+      # resposta. 60s é folga confortável, e explícito no arquivo para não
+      # depender do padrão de um serviço recriado.
+      - --timeout=60
+
+images:
+  - gcr.io/$PROJECT_ID/trix-classify-conflicts:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
