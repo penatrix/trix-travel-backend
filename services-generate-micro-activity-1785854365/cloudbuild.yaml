@@ -71,15 +71,16 @@ steps:
       - ${_SERVICE_NAME}
       - --image=gcr.io/$PROJECT_ID/trix-generate-micro-activity:$COMMIT_SHA
       - --region=${_REGION}
-      # O handler gasta no pior caso 48s (40s de Gemini + 8s de Google em
-      # paralelo), pensado para caber embaixo dos 60s em que o app aborta.
+      # O handler gasta no pior caso 58s (50s de Gemini + 8s de Google em
+      # paralelo), pensado para caber embaixo dos 65s em que o app aborta.
       # Este teto precisa ser MAIOR que o nosso, senão quem corta é a
       # plataforma - e plataforma cortando mata o processo, sem log e sem
       # resposta.
       #
-      # 90s é folga para os 48s mais a serialização da resposta. Explícito
+      # 90s é folga para os 58s mais a serialização da resposta. Explícito
       # no arquivo, e não só no console, para não voltar ao padrão de 60s
-      # silenciosamente num serviço recriado.
+      # silenciosamente num serviço recriado - o que agora seria MENOR que
+      # o orçamento do handler.
       - --timeout=90
 
 images:
