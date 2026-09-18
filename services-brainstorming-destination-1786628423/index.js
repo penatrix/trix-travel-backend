@@ -1,5 +1,15 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
+const { registrarToken } = require('./registra-token');
+
+// O modelo desta chamada, num lugar só.
+//
+// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
+// solto dentro da URL, a linha registraria o que alguém digitou no
+// registro e não o que de fato foi chamado -- e a diferença só
+// apareceria numa planilha de custo, meses depois.
+const MODELO_GEMINI = 'gemini-3.1-pro-preview';
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -128,7 +138,7 @@ exports.generateBrainstorming = async (req, res) => {
     let geminiResponse;
     const inicio = Date.now();
     try {
-      geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+      geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -209,6 +219,20 @@ exports.generateBrainstorming = async (req, res) => {
       .eq('id', sessionId);
 
     if (updateError) throw updateError;
+
+    // A coluna `tokens_used` FICA. A linha nova é acréscimo, e nasce
+    // SEM roteiro de propósito: o brainstorming acontece antes de
+    // existir roteiro, e 80 dos 88 medidos em 18/09 nunca viraram um.
+    // Esse gasto é real e "custo por roteiro" não o enxerga -- por isso
+    // ele entra pelo eixo do usuário.
+    //
+    // Sem `await`: contabilidade não segura resposta de usuário.
+    registrarToken({
+      kind: 'brainstorming',
+      tokens: tokenCount,
+      userId: sessionRecord.user_id,
+      model: MODELO_GEMINI,
+    });
 
     return res.status(200).json({ success: true });
 

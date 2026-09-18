@@ -3,6 +3,16 @@ const jwt = require('jsonwebtoken');
 // Chega aqui por um passo de cópia no cloudbuild (id `copia-validacao`) e,
 // no desenvolvimento local, pelo `pretest` do package.json.
 const { escolherCandidato } = require('./escolher-candidato');
+const { registrarToken } = require('./registra-token');
+
+// O modelo desta chamada, num lugar só.
+//
+// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
+// solto dentro da URL, a linha registraria o que alguém digitou no
+// registro e não o que de fato foi chamado -- e a diferença só
+// apareceria numa planilha de custo, meses depois.
+const MODELO_GEMINI = 'gemini-3.1-pro-preview';
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -92,7 +102,7 @@ async function pedirSugestao(promptText, tetoMs) {
   const inicio = Date.now();
 
   try {
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -159,7 +169,11 @@ exports.generateMicroActivity = async (req, res) => {
   }
 
   // So chamado de dentro do app, com uma viagem ja salva -- sempre ha sessao.
-  if (!verifySupabaseAuth(req)) {
+  // O `sub` do JWT é o dono do gasto. Antes o retorno era descartado
+  // -- só interessava se era válido --, e é por isso que este serviço
+  // não sabia de quem era o token que gastava.
+  const usuario = verifySupabaseAuth(req);
+  if (!usuario) {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
@@ -232,6 +246,21 @@ exports.generateMicroActivity = async (req, res) => {
     }
 
     console.log(`[Analytics] MicroActivity gerada. Tokens: ${tokens}`);
+
+    // **Até 18/09 este número só ia para o log.** Ele existia em toda
+    // chamada e não entrava em conta nenhuma -- é uma das três origens
+    // que o US$ 0,08 por roteiro ignora.
+    //
+    // `trip_id` chega nulo enquanto o app não recarregar: o campo é
+    // novo no corpo. Gravar com nulo é melhor que não gravar, porque o
+    // total continua certo -- só não sabe de quem é.
+    registrarToken({
+      kind: 'micro_activity',
+      tokens,
+      tripId: req.body.trip_id,
+      userId: usuario?.sub,
+      model: MODELO_GEMINI,
+    });
 
     // Devolve UM objeto, exatamente como sempre devolveu. O app não muda
     // para receber - só o prompt muda, para produzir três.

@@ -1,5 +1,15 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
+const { registrarToken } = require('./registra-token');
+
+// O modelo desta chamada, num lugar só.
+//
+// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
+// solto dentro da URL, a linha registraria o que alguém digitou no
+// registro e não o que de fato foi chamado -- e a diferença só
+// apareceria numa planilha de custo, meses depois.
+const MODELO_GEMINI = 'gemini-3.6-flash';
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -174,7 +184,7 @@ exports.updateTravelerMemory = async (req, res) => {
     }
 
     // 2. Chamada super rápida e barata ao Gemini
-    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+    const geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -323,6 +333,17 @@ exports.updateTravelerMemory = async (req, res) => {
     if (zeradas.length) console.log(`[TravelerMemory] ${user_id} neutralizadas: ${zeradas.join(', ')}`);
 
     console.log(`[TravelerMemory] Memória atualizada com sucesso para ${user_id}. Tokens usados: ${tokenCount}`);
+
+    // Este é o único serviço que roda em Flash, e é por isso que a
+    // coluna `model` existe na tabela: sem ela, somar Pro com Flash
+    // daria um número que não é preço de nenhum dos dois.
+    registrarToken({
+      kind: 'traveler_memory',
+      tokens: tokenCount,
+      tripId: req.body.trip_id,
+      userId: user_id,
+      model: MODELO_GEMINI,
+    });
 
     return res.status(200).json({
       success: true,
