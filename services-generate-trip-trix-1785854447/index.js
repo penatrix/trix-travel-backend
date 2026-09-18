@@ -1,6 +1,16 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
+const { registrarToken } = require('./registra-token');
+
+// O modelo desta chamada, num lugar só.
+//
+// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
+// solto dentro da URL, a linha registraria o que alguém digitou no
+// registro e não o que de fato foi chamado -- e a diferença só
+// apareceria numa planilha de custo, meses depois.
+const MODELO_GEMINI = 'gemini-3.1-pro-preview';
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -236,7 +246,7 @@ exports.generateTrip = async (req, res) => {
 
     // 1. Chama a API do Gemini Pro com Thinking MEDIUM
     const geminiResponse = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         contents: [{ role: "user", parts: [{ text: promptText }] }],
         generationConfig: {
@@ -366,6 +376,21 @@ exports.generateTrip = async (req, res) => {
       .select('id');
 
     if (updateError) throw updateError;
+
+    // A coluna `tokens_used` FICA: é o que a tela lê hoje, e tirá-la
+    // agora quebraria a leitura antes de existir substituto. A linha
+    // nova é acréscimo -- é ela que soma com a troca de atividade, a
+    // emenda e a destilação, que a coluna nunca viu.
+    //
+    // Sem `await`: contabilidade não segura resposta de usuário, e
+    // falha dela não pode desfazer um roteiro que já ficou pronto.
+    registrarToken({
+      kind: 'generate_trip',
+      tokens: tokenCount,
+      tripId,
+      userId: tripRecord.user_id,
+      model: MODELO_GEMINI,
+    });
 
     if (!linhasAtualizadas || linhasAtualizadas.length === 0) {
       // Não é erro: é o job tendo chegado antes. Nada a estornar aqui, ele

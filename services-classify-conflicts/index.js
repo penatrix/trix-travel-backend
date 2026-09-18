@@ -4,6 +4,16 @@ const { montarPrompt, conferirResposta } = require('./classificar');
 // `copia-validacao`) e, no desenvolvimento local, pelo `pretest`. É o mesmo
 // arquivo que o generate-trip e o generate-micro-activity usam.
 const { avaliarDisponibilidades } = require('./disponibilidade');
+const { registrarToken } = require('./registra-token');
+
+// O modelo desta chamada, num lugar só.
+//
+// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
+// solto dentro da URL, a linha registraria o que alguém digitou no
+// registro e não o que de fato foi chamado -- e a diferença só
+// apareceria numa planilha de custo, meses depois.
+const MODELO_GEMINI = 'gemini-3.1-pro-preview';
 
 // Este serviço NÃO fala com o Supabase, e é o primeiro que não fala.
 //
@@ -87,7 +97,11 @@ exports.classifyConflicts = async (req, res) => {
     return res.status(204).send('');
   }
 
-  if (!verifySupabaseAuth(req)) {
+  // O `sub` do JWT é o dono do gasto. Antes o retorno era descartado
+  // -- só interessava se era válido --, e é por isso que este serviço
+  // não sabia de quem era o token que gastava.
+  const usuario = verifySupabaseAuth(req);
+  if (!usuario) {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
@@ -146,7 +160,7 @@ exports.classifyConflicts = async (req, res) => {
     // pela qual a escolha de candidato na troca de atividade é paralela.
     const [resposta, disponibilidade] = await Promise.all([
       fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -217,6 +231,22 @@ exports.classifyConflicts = async (req, res) => {
     }
 
     const tokens = dados.usageMetadata?.totalTokenCount ?? 0;
+
+    // **Este serviço não fala com o Supabase, e continua não falando.**
+    // Ele tem duas variáveis de ambiente e uma dependência só, e dar-lhe
+    // o SDK para gravar uma linha desfaria justamente o que o torna
+    // barato. O `registra-token` usa `fetch` contra o PostgREST, sem
+    // dependência nenhuma -- o preço é duas variáveis a mais na
+    // configuração do Cloud Run, e o módulo avisa alto no log se elas
+    // faltarem, em vez de deixar o número sumir em silêncio.
+    registrarToken({
+      kind: 'classify_conflicts',
+      tokens,
+      tripId: req.body?.trip_id,
+      userId: usuario?.sub,
+      model: MODELO_GEMINI,
+    });
+
     console.log(
       `[Conflitos] ${conflitos.length} de ${itens.length} conflitam. Tokens: ${tokens}`,
     );

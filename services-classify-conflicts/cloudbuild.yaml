@@ -57,6 +57,19 @@ steps:
       - services-generate-trip-trix-1785854447/validar-lugares.js
       - services-classify-conflicts/validar-lugares.js
 
+  # O registra-token.js vive na pasta do generate-trip e é usado pelos
+  # cinco serviços que falam com o Gemini. Como o contexto do `pack` é a
+  # pasta do serviço (`--path=.`), nada de fora dela entra na imagem --
+  # então o arquivo é copiado para cá ANTES do build. Sem este passo o
+  # build passa e a revisão quebra em runtime, no require. É o mesmo
+  # mecanismo do `copia-validacao`, e pela mesma razão.
+  - id: copia-registra-token
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/registra-token.js
+      - services-classify-conflicts/registra-token.js
+
   - id: build
     name: gcr.io/k8s-skaffold/pack
     dir: services-classify-conflicts

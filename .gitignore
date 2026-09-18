@@ -20,6 +20,14 @@
 */validar-lugares.js
 !services-generate-trip-trix-*/validar-lugares.js
 
+# Mesma coisa para o `registra-token.js`, e pela mesma razão. A
+# diferença é a escala: ele é consumido por QUATRO serviços em vez de
+# dois, então o padrão genérico deixa de ser conveniência e passa a ser
+# o que impede quatro cópias divergindo em silêncio -- que é o erro que
+# a limpeza de 01/09 matou e que este arquivo existe para não repetir.
+*/registra-token.js
+!services-generate-trip-trix-*/registra-token.js
+
 # Impede que node_modules NOVO entre no repositório.
 #
 # Não desfaz o que já está rastreado: o update-memory tem 709 arquivos de
