@@ -27,6 +27,22 @@ substitutions:
   _REGION: europe-west1
 
 steps:
+  # O registra-evento.js vive na pasta do generate-trip e é usado pelos
+  # seis serviços. Como o contexto do `pack` é a pasta do serviço
+  # (`--path=.`), nada de fora dela entra na imagem -- então o arquivo é
+  # copiado para cá ANTES do build. Sem este passo o build passa e a
+  # revisão quebra em runtime, no require.
+  #
+  # Este serviço entrou na lista em 21/09: ele não fala com o Gemini,
+  # mas cada requisição dele é uma chamada paga de Places Autocomplete,
+  # e esse gasto só existia na fatura.
+  - id: copia-registra-evento
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/registra-evento.js
+      - services-search-places-trix-1785854528/registra-evento.js
+
   - id: build
     name: gcr.io/k8s-skaffold/pack
     dir: services-search-places-trix-1785854528

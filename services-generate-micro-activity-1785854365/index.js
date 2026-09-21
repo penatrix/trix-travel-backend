@@ -3,11 +3,15 @@ const jwt = require('jsonwebtoken');
 // Chega aqui por um passo de cópia no cloudbuild (id `copia-validacao`) e,
 // no desenvolvimento local, pelo `pretest` do package.json.
 const { escolherCandidato } = require('./escolher-candidato');
-const { registrarToken } = require('./registra-token');
+const {
+  registrarEvento,
+  contadorDePlaces,
+  statusDoErro,
+} = require('./registra-evento');
 
 // O modelo desta chamada, num lugar só.
 //
-// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// Ele passou a ter nome porque agora é DADO: a linha de `eventos`
 // grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
 // solto dentro da URL, a linha registraria o que alguém digitou no
 // registro e não o que de fato foi chamado -- e a diferença só
@@ -142,7 +146,11 @@ async function pedirSugestao(promptText, tetoMs) {
 
     return {
       sugestao: JSON.parse(cleanText),
-      tokens: geminiData.usageMetadata?.totalTokenCount ?? 0,
+      // O `usageMetadata` CRU, e não o total já somado: a separação
+      // entre entrada e saída mora no `registra-evento`, num lugar só,
+      // porque ela tem uma sutileza (o pensamento conta como saída) que
+      // não sobreviveria a seis cópias.
+      uso: geminiData.usageMetadata ?? null,
     };
   } catch (erroDaChamada) {
     if (erroDaChamada.name === 'AbortError') {
@@ -177,6 +185,13 @@ exports.generateMicroActivity = async (req, res) => {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
+  // Ver o comentário equivalente no generate-trip: o relógio conta o
+  // tempo do handler, e o que já se sabe fica em escopo de handler
+  // porque o `catch` também registra.
+  const comecou = Date.now();
+  const contador = contadorDePlaces();
+  let usoDoGemini = null;
+
   try {
     // Agora o Cloud Run não pensa, só recebe o prompt pronto do FlutterFlow
     // `period` é OPCIONAL de propósito. Ele só existe no corpo depois que
@@ -191,7 +206,9 @@ exports.generateMicroActivity = async (req, res) => {
 
     console.log(`[MicroActivity] Iniciando requisição para o Gemini...`);
 
-    const { sugestao: bruto, tokens } = await pedirSugestao(promptText, TETO_GEMINI_MS);
+    const { sugestao: bruto, uso } = await pedirSugestao(promptText, TETO_GEMINI_MS);
+    usoDoGemini = uso;
+    const tokens = uso?.totalTokenCount ?? 0;
 
     // =============================================================
     // OS CANDIDATOS
@@ -225,6 +242,7 @@ exports.generateMicroActivity = async (req, res) => {
       candidatos,
       periodo,
       process.env.GOOGLE_MAPS_KEY,
+      contador,
     );
 
     escolha.vereditos.forEach((v, i) => {
@@ -254,12 +272,23 @@ exports.generateMicroActivity = async (req, res) => {
     // `trip_id` chega nulo enquanto o app não recarregar: o campo é
     // novo no corpo. Gravar com nulo é melhor que não gravar, porque o
     // total continua certo -- só não sabe de quem é.
-    registrarToken({
-      kind: 'micro_activity',
-      tokens,
+    registrarEvento({
+      tipo: 'troca_atividade',
       tripId: req.body.trip_id,
       userId: usuario?.sub,
-      model: MODELO_GEMINI,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      // Três candidatos são até seis idas ao Google (busca + horário
+      // de cada). Esse gasto nunca entrou em conta nenhuma, e em
+      // setembro o Places passou a custar quase o mesmo que o Gemini.
+      chamadasPlaces: contador.chamadas,
+      duracaoMs: Date.now() - comecou,
+      meta: {
+        candidatos: candidatos.length,
+        // `degradado` é o que diz se três candidatos estão bastando.
+        // Era só log; agora é série temporal.
+        degradado: !!escolha.degradado,
+      },
     });
 
     // Devolve UM objeto, exatamente como sempre devolveu. O app não muda
@@ -268,6 +297,22 @@ exports.generateMicroActivity = async (req, res) => {
 
   } catch (error) {
     console.error(`[CRÍTICO] Erro na MicroActivity:`, error.message);
+
+    // A falha também é um número -- ver o comentário longo no
+    // generate-trip. Se o Gemini chegou a responder, a entrada já foi
+    // cobrada, e `usoDoGemini` carrega quanto.
+    registrarEvento({
+      tipo: 'troca_atividade',
+      status: statusDoErro(error),
+      motivo: error.message,
+      tripId: req.body?.trip_id,
+      userId: usuario?.sub,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      chamadasPlaces: contador.chamadas,
+      duracaoMs: Date.now() - comecou,
+    });
+
     return res.status(500).json({ error: error.message });
   }
 };

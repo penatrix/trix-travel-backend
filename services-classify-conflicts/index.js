@@ -4,11 +4,15 @@ const { montarPrompt, conferirResposta } = require('./classificar');
 // `copia-validacao`) e, no desenvolvimento local, pelo `pretest`. É o mesmo
 // arquivo que o generate-trip e o generate-micro-activity usam.
 const { avaliarDisponibilidades } = require('./disponibilidade');
-const { registrarToken } = require('./registra-token');
+const {
+  registrarEvento,
+  contadorDePlaces,
+  statusDoErro,
+} = require('./registra-evento');
 
 // O modelo desta chamada, num lugar só.
 //
-// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// Ele passou a ter nome porque agora é DADO: a linha de `eventos`
 // grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
 // solto dentro da URL, a linha registraria o que alguém digitou no
 // registro e não o que de fato foi chamado -- e a diferença só
@@ -109,6 +113,11 @@ exports.classifyConflicts = async (req, res) => {
   const alarme = setTimeout(() => controlador.abort(), TETO_GEMINI_MS);
   const inicio = Date.now();
 
+  // O `inicio` acima já media o tempo, mas só para o log. Isto é o
+  // mesmo relógio virando dado -- ver o comentário no generate-trip.
+  const contador = contadorDePlaces();
+  let usoDoGemini = null;
+
   try {
     const { restriction, items } = req.body ?? {};
 
@@ -191,7 +200,11 @@ exports.classifyConflicts = async (req, res) => {
           signal: controlador.signal,
         },
       ),
-      avaliarDisponibilidades(paraValidar, process.env.GOOGLE_MAPS_KEY),
+      avaliarDisponibilidades(
+        paraValidar,
+        process.env.GOOGLE_MAPS_KEY,
+        contador,
+      ),
     ]);
 
     if (!resposta.ok) {
@@ -230,21 +243,32 @@ exports.classifyConflicts = async (req, res) => {
       console.warn(`[Conflitos] Descartados: ${descartados.join(' | ')}`);
     }
 
+    usoDoGemini = dados.usageMetadata ?? null;
     const tokens = dados.usageMetadata?.totalTokenCount ?? 0;
 
     // **Este serviço não fala com o Supabase, e continua não falando.**
     // Ele tem duas variáveis de ambiente e uma dependência só, e dar-lhe
     // o SDK para gravar uma linha desfaria justamente o que o torna
-    // barato. O `registra-token` usa `fetch` contra o PostgREST, sem
+    // barato. O `registra-evento` usa `fetch` contra o PostgREST, sem
     // dependência nenhuma -- o preço é duas variáveis a mais na
     // configuração do Cloud Run, e o módulo avisa alto no log se elas
     // faltarem, em vez de deixar o número sumir em silêncio.
-    registrarToken({
-      kind: 'classify_conflicts',
-      tokens,
+    registrarEvento({
+      tipo: 'emenda_restricao',
       tripId: req.body?.trip_id,
       userId: usuario?.sub,
-      model: MODELO_GEMINI,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      // A emenda valida backups no Google em paralelo com o Gemini.
+      // Eram idas invisíveis: o custo aparecia na fatura e em lugar
+      // nenhum mais.
+      chamadasPlaces: contador.chamadas,
+      duracaoMs: Date.now() - inicio,
+      meta: {
+        itens: itens.length,
+        conflitos: conflitos.length,
+        validados: paraValidar.length,
+      },
     });
 
     console.log(
@@ -270,8 +294,28 @@ exports.classifyConflicts = async (req, res) => {
       tokens,
     });
   } catch (erro) {
-    if (erro.name === 'AbortError') {
-      const msg = `Gemini nao respondeu em ${Math.round(TETO_GEMINI_MS / 1000)}s na classificacao de conflitos.`;
+    const abortou = erro.name === 'AbortError';
+    const msg = abortou
+      ? `Gemini nao respondeu em ${Math.round(TETO_GEMINI_MS / 1000)}s na classificacao de conflitos.`
+      : erro.message;
+
+    // A falha também é um número -- ver o comentário longo no
+    // generate-trip. Aqui ela pesa mais do que a média: emenda que não
+    // classifica é celíaco sem resposta sobre o jantar, e até 21/09
+    // esse desfecho não deixava rastro nenhum além de uma linha de log.
+    registrarEvento({
+      tipo: 'emenda_restricao',
+      status: statusDoErro(erro),
+      motivo: msg,
+      tripId: req.body?.trip_id,
+      userId: usuario?.sub,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      chamadasPlaces: contador.chamadas,
+      duracaoMs: Date.now() - inicio,
+    });
+
+    if (abortou) {
       console.error(`[CRÍTICO] ${msg}`);
       return res.status(500).json({ error: msg });
     }

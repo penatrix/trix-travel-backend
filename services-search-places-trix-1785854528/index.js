@@ -1,5 +1,12 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
+// Chega aqui por um passo de cópia no cloudbuild (id
+// `copia-registra-evento`) e, no desenvolvimento local, pelo `pretest`
+// do package.json. O arquivo vive na pasta do generate-trip.
+const {
+  registrarEvento,
+  statusDoErro,
+} = require('./registra-evento');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -42,6 +49,21 @@ function verifyWebhookSecret(req) {
 // =================================================================
 // NOVO SERVIÇO: PROXY DO GOOGLE PLACES (Busca de Cidades)
 // =================================================================
+// =====================================================================
+// POR QUE ESTE SERVIÇO PASSOU A REGISTRAR EVENTO
+// =====================================================================
+//
+// Ele é o único que não fala com o Gemini, e por isso ficou de fora do
+// contador de token. Mas ele gasta: cada requisição é uma chamada de
+// Places Autocomplete, e em setembro o Places passou a custar quase o
+// mesmo que o Gemini (R$ 25,67 contra R$ 26,57). A fatura via esse
+// gasto; nenhuma contagem nossa via.
+//
+// O volume é moderado de propósito: o campo do app só busca a partir de
+// três caracteres e com 320ms de espera, então digitar "Dresden" custa
+// uma a três chamadas, não sete.
+// =====================================================================
+
 exports.searchPlaces = async (req, res) => {
   // 1. A MÁGICA DO CORS: Isso avisa ao navegador Web que ele pode confiar nesta API
   res.set('Access-Control-Allow-Origin', '*');
@@ -64,9 +86,12 @@ exports.searchPlaces = async (req, res) => {
   const bearerToken = (req.headers.authorization || '')
     .replace(/^Bearer\s*/i, '')
     .trim();
-  if (bearerToken && !verifySupabaseAuth(req)) {
+  const usuario = bearerToken ? verifySupabaseAuth(req) : null;
+  if (bearerToken && !usuario) {
     return res.status(401).json({ error: 'Token de autenticação inválido.' });
   }
+
+  const comecou = Date.now();
 
   // 2. Pega o que o FlutterFlow enviou na URL
   const input = req.query.input;
@@ -85,6 +110,36 @@ exports.searchPlaces = async (req, res) => {
     const response = await fetch(googleUrl);
     const data = await response.json();
 
+    // Uma chamada saiu daqui, independente do que o Google respondeu --
+    // ZERO_RESULTS é cobrado igual. Sem `await`: contabilidade não
+    // segura resposta de usuário.
+    //
+    // `userId` fica nulo no funil pré-cadastro, e isso é informação, não
+    // buraco: é a fatia do gasto que acontece antes de existir conta, e
+    // ela não aparece em nenhum outro lugar.
+    registrarEvento({
+      tipo: 'busca_lugares',
+      status: data.status === 'OK' || data.status === 'ZERO_RESULTS'
+        ? 'ok'
+        : 'erro',
+      motivo: data.status === 'OK' || data.status === 'ZERO_RESULTS'
+        ? null
+        : data.status,
+      userId: usuario?.sub,
+      chamadasPlaces: 1,
+      duracaoMs: Date.now() - comecou,
+      meta: {
+        // O TERMO não entra: é o que a pessoa digitou, e guardar isso
+        // seria dado pessoal atrás de uma coluna de contabilidade. O
+        // tamanho responde a pergunta que interessa -- se o mínimo de
+        // três caracteres está segurando chamada à toa.
+        tamanho_do_termo: String(input).length,
+        sugestoes: Array.isArray(data.predictions)
+          ? data.predictions.length
+          : 0,
+      },
+    });
+
     if (data.status === 'OK') {
       return res.status(200).json(data.predictions);
     } else {
@@ -92,6 +147,16 @@ exports.searchPlaces = async (req, res) => {
     }
   } catch (error) {
     console.error('Erro ao chamar o Google Places:', error);
+
+    registrarEvento({
+      tipo: 'busca_lugares',
+      status: statusDoErro(error),
+      motivo: error.message,
+      userId: usuario?.sub,
+      chamadasPlaces: 1,
+      duracaoMs: Date.now() - comecou,
+    });
+
     return res.status(500).json({ error: 'Erro interno no servidor' });
   }
 };

@@ -43,14 +43,14 @@ const {
 /// `status` é 'aberto' | 'fechado' | 'nao_encontrado' | 'erro'.
 /// `hours_ok` é true / false / null, e **null não é reprovação**: praça,
 /// mirante e praia não têm horário cadastrado no Google.
-async function avaliarDisponibilidade(item, apiKey) {
+async function avaliarDisponibilidade(item, apiKey, contador = null) {
   const busca = String(item?.maps_search_query ?? '').trim();
 
   if (!apiKey || !busca) {
     return { id: item.id, status: 'erro', hours_ok: null, motivo: 'sem chave ou sem busca' };
   }
 
-  const lugar = await consultarLugar(busca, apiKey);
+  const lugar = await consultarLugar(busca, apiKey, contador);
 
   // Sem place_id não há como pedir horário. Vale para fechado, não
   // encontrado e erro.
@@ -70,7 +70,10 @@ async function avaliarDisponibilidade(item, apiKey) {
   // Sem período reconhecido, o horário fica sem veredito - e o item
   // continua elegível. Não é reprovação por falta de pergunta.
   const hours_ok = janela
-    ? abreNoPeriodoEmAlgumDia(await consultarHorarios(lugar.placeId, apiKey), janela)
+    ? abreNoPeriodoEmAlgumDia(
+        await consultarHorarios(lugar.placeId, apiKey, contador),
+        janela,
+      )
     : null;
 
   return {
@@ -92,14 +95,16 @@ async function avaliarDisponibilidade(item, apiKey) {
 /// esse campo só para os backups, porque as atividades já foram validadas
 /// na geração do roteiro. Revalidar tudo dobraria a conta do Google sem
 /// responder nada novo.
-async function avaliarDisponibilidades(itens, apiKey) {
+async function avaliarDisponibilidades(itens, apiKey, contador = null) {
   const candidatos = (Array.isArray(itens) ? itens : []).filter(
     (i) => i && String(i.maps_search_query ?? '').trim() && String(i.id ?? '').trim(),
   );
 
   if (candidatos.length === 0) return [];
 
-  return Promise.all(candidatos.map((i) => avaliarDisponibilidade(i, apiKey)));
+  return Promise.all(
+    candidatos.map((i) => avaliarDisponibilidade(i, apiKey, contador)),
+  );
 }
 
 module.exports = { avaliarDisponibilidade, avaliarDisponibilidades };

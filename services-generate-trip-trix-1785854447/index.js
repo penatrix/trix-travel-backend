@@ -1,11 +1,14 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
-const { registrarToken } = require('./registra-token');
+const {
+  registrarEvento,
+  statusDoErro,
+} = require('./registra-evento');
 
 // O modelo desta chamada, num lugar só.
 //
-// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// Ele passou a ter nome porque agora é DADO: a linha de `eventos`
 // grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
 // solto dentro da URL, a linha registraria o que alguém digitou no
 // registro e não o que de fato foi chamado -- e a diferença só
@@ -84,6 +87,40 @@ function verifyWebhookSecret(req) {
 // =================================================================
 const GEMINI_TIMEOUT_MS = 5 * 60 * 1000;
 
+/// Duração em dias, contando as duas pontas -- é a mesma conta que o
+/// wizard faz para respeitar o teto de 30.
+///
+/// Não existe coluna `duration_days` na `trips`: a duração é derivada,
+/// e `start_date` está SEMPRE preenchido (quando o viajante não escolhe
+/// data, o insert grava uma provisória e marca `is_date_set = false`).
+/// Para contabilidade isso não atrapalha: o que interessa é o tamanho
+/// do roteiro pedido, e ele é o mesmo com data provisória ou não.
+function diasDoRoteiro(inicio, fim) {
+  if (!inicio || !fim) return null;
+  const a = new Date(inicio);
+  const b = new Date(fim);
+  if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return null;
+  const dias = Math.round((b - a) / 86400000) + 1;
+  return dias > 0 ? dias : null;
+}
+
+/// Quantas atividades o modelo devolveu, somando todos os dias de todos
+/// os destinos.
+///
+/// É o número que casa com o gasto de saída: a trip 290 devolveu 153
+/// atividades em 31 dias e 24.877 tokens. Sem ele, "roteiro de 10 dias"
+/// pode significar 30 ou 90 atividades, e a média por dia não explica
+/// nada.
+function contarAtividades(roteiro) {
+  let n = 0;
+  for (const destino of roteiro?.destinations ?? []) {
+    for (const dia of destino?.itinerary ?? []) {
+      n += (dia?.activities ?? []).length;
+    }
+  }
+  return n || null;
+}
+
 async function fetchGemini(url, body, rotulo) {
   for (let tentativa = 1; tentativa <= 2; tentativa++) {
     const controller = new AbortController();
@@ -119,6 +156,20 @@ async function fetchGemini(url, body, rotulo) {
 }
 
 exports.generateTrip = async (req, res) => {
+  // O relógio começa na PRIMEIRA linha do handler, não na chamada ao
+  // Gemini. O que interessa medir é o tempo que o usuário espera olhando
+  // o spinner, e dentro dele cabem o Gemini, a validação de lugares no
+  // Google e duas idas ao banco. Medir só o modelo responderia a
+  // pergunta errada.
+  const comecou = Date.now();
+
+  // O que o registro de evento já sabe quando o erro acontece. O `catch`
+  // precisa disso: linha de falha sem modelo nem tokens de entrada é
+  // linha que diz "quebrou" e não diz quanto custou -- e a entrada é
+  // cobrada mesmo quando a saída não chega.
+  let usoDoGemini = null;
+  let chamadasPlaces = null;
+
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
   // Idem para o estorno: o catch precisa saber DE QUEM devolver o crédito e
@@ -177,7 +228,16 @@ exports.generateTrip = async (req, res) => {
     // =================================================================
     const { data: tripAtual, error: leituraError } = await supabase
       .from('trips')
-      .select('id, user_id, status, prompt_payload, start_date')
+      // `end_date`, `travelers_count` e `pace_level` entram só para o
+      // registro de evento: é o `meta` que explica POR QUE um roteiro
+      // custou o que custou. A medição de 11/09 diz que o que pesa é
+      // `dias x ritmo`, não dias -- sem esses três, um mês caro fica
+      // sem explicação e a única saída é reabrir o Cloud Logging.
+      // Mesma ida ao banco, três colunas a mais.
+      .select(
+        'id, user_id, status, prompt_payload, start_date, ' +
+        'end_date, travelers_count, pace_level',
+      )
       .eq('id', tripRecord.id)
       .maybeSingle();
 
@@ -290,6 +350,12 @@ exports.generateTrip = async (req, res) => {
       );
     }
 
+    // Guardado em variável de handler, e não só local, porque o `catch`
+    // abaixo também registra: uma geração que passa do Gemini e quebra
+    // no JSON gastou token de verdade, e essa linha precisa dizer
+    // quanto.
+    usoDoGemini = geminiData.usageMetadata ?? null;
+
     let tokenCount = 0;
     if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
       tokenCount = geminiData.usageMetadata.totalTokenCount;
@@ -337,6 +403,11 @@ exports.generateTrip = async (req, res) => {
     );
     resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
 
+    // Em setembro o Places passou a custar quase o mesmo que o Gemini
+    // (R$ 25,67 contra R$ 26,57). Até 21/09 esse número não existia em
+    // lugar nenhum a não ser na fatura, que não diz qual roteiro gastou.
+    chamadasPlaces = resumoLugares.chamadas_places;
+
     const tripTitle = tripJsonObject.trip_title || 'Viagem Personalizada';
     // Lido DEPOIS da validação de propósito: se houve troca ou remoção, o
     // total foi reajustado e é esse valor que alimenta o controle de orçamento.
@@ -380,16 +451,28 @@ exports.generateTrip = async (req, res) => {
     // A coluna `tokens_used` FICA: é o que a tela lê hoje, e tirá-la
     // agora quebraria a leitura antes de existir substituto. A linha
     // nova é acréscimo -- é ela que soma com a troca de atividade, a
-    // emenda e a destilação, que a coluna nunca viu.
+    // emenda e a destilação, que a coluna nunca viu, e é a única que
+    // separa entrada de saída.
     //
     // Sem `await`: contabilidade não segura resposta de usuário, e
     // falha dela não pode desfazer um roteiro que já ficou pronto.
-    registrarToken({
-      kind: 'generate_trip',
-      tokens: tokenCount,
+    registrarEvento({
+      tipo: 'geracao_roteiro',
       tripId,
       userId: tripRecord.user_id,
-      model: MODELO_GEMINI,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      chamadasPlaces,
+      duracaoMs: Date.now() - comecou,
+      // O tamanho do roteiro é o que explica o tamanho da conta: a
+      // medição de 11/09 diz que o que pesa é `dias x ritmo`, não dias.
+      // Sem isto, um mês caro fica sem explicação.
+      meta: {
+        dias: diasDoRoteiro(tripAtual?.start_date, tripAtual?.end_date),
+        viajantes: Number(tripAtual?.travelers_count) || null,
+        ritmo: tripAtual?.pace_level || null,
+        atividades: contarAtividades(tripJsonObject),
+      },
     });
 
     if (!linhasAtualizadas || linhasAtualizadas.length === 0) {
@@ -407,6 +490,33 @@ exports.generateTrip = async (req, res) => {
 
   } catch (error) {
     console.error(`[CRÍTICO] Erro na Trip ${tripId}:`, error.message);
+
+    // 3.5. A FALHA TAMBÉM É UM NÚMERO.
+    //
+    // Até 21/09 falha não gravava linha nenhuma: a contabilidade só via
+    // sucesso, e as nove primeiras falhas da história do produto só
+    // apareceram por resgate manual do Cloud Logging. Isso faz duas
+    // perguntas ficarem sem resposta: quanto se gasta em roteiro que
+    // nunca chega ao usuário, e com que frequência.
+    //
+    // A entrada é cobrada mesmo quando a saída não chega -- uma geração
+    // que passa do Gemini e quebra no `JSON.parse` já queimou o prompt
+    // inteiro. Por isso `usoDoGemini` vem de variável de handler: se
+    // houve resposta, o custo dela entra na linha de erro.
+    //
+    // Roda ANTES do update para 'failed' de propósito: se o banco
+    // estiver fora, o update abaixo falha e o evento já saiu.
+    registrarEvento({
+      tipo: 'geracao_roteiro',
+      status: statusDoErro(error),
+      motivo: error.message,
+      tripId,
+      userId,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      chamadasPlaces,
+      duracaoMs: Date.now() - comecou,
+    });
 
     // 4. A REDE DE SEGURANÇA: Se temos um tripId, avisamos o app que falhou
     if (tripId) {

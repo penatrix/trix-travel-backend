@@ -220,7 +220,17 @@ function trocarDeSlot(atividades, i, j) {
   atividades[j] = t;
 }
 
-async function consultarHorarios(placeId, apiKey) {
+/// O `contador` é opcional e existe para a contabilidade: um objeto
+/// `{ chamadas }` que esta função incrementa a cada ida ao Google. Ele
+/// entra por PARÂMETRO, e não como variável de módulo, porque o Cloud
+/// Run serve requisições concorrentes na mesma instância -- contador
+/// global misturaria o roteiro de um usuário com a troca de atividade
+/// de outro. Quem não passa nada continua funcionando igual.
+///
+/// A contagem acontece ANTES do `fetch`: o que se quer saber é quantas
+/// chamadas saíram daqui, e chamada que estourou timeout saiu do mesmo
+/// jeito.
+async function consultarHorarios(placeId, apiKey, contador = null) {
   const url =
     'https://maps.googleapis.com/maps/api/place/details/json' +
     `?place_id=${encodeURIComponent(placeId)}&fields=opening_hours&key=${apiKey}`;
@@ -228,6 +238,7 @@ async function consultarHorarios(placeId, apiKey) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
+    if (contador) contador.chamadas += 1;
     const resposta = await fetch(url, { signal: controller.signal });
     if (!resposta.ok) return null;
     const dados = await resposta.json();
@@ -268,7 +279,7 @@ function valorBrl(texto) {
 
 /// Consulta um lugar pelo texto de busca. Devolve sempre um objeto - nunca
 /// lança - porque falha de rede não pode derrubar a geração inteira.
-async function consultarLugar(textoBusca, apiKey) {
+async function consultarLugar(textoBusca, apiKey, contador = null) {
   const url =
     'https://maps.googleapis.com/maps/api/place/textsearch/json' +
     `?query=${encodeURIComponent(textoBusca)}&key=${apiKey}`;
@@ -277,6 +288,7 @@ async function consultarLugar(textoBusca, apiKey) {
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
+    if (contador) contador.chamadas += 1;
     const resposta = await fetch(url, { signal: controller.signal });
     if (!resposta.ok) {
       return { veredito: 'erro', motivo: `HTTP ${resposta.status}` };
@@ -371,6 +383,12 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
     trocados: 0,
     removidos: 0,
     horarios_verificados: 0,
+    // Quantas idas ao Google saíram daqui, somando busca e horário. É
+    // ISTO que vira `chamadas_places` na tabela `eventos`, e não a soma
+    // de `verificados` com `horarios_verificados`: aqueles dois contam
+    // LUGARES, e coincidem com as chamadas só enquanto ninguém puser
+    // cache ou repetição no caminho. O contador conta a chamada.
+    chamadas_places: 0,
     fora_do_horario: 0,
     reordenados: 0,
     trocados_por_horario: 0,
@@ -389,8 +407,9 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
   if (!lugares.length) return resumo;
 
   // ---- 1. Status de cada lugar ----
+  const contador = { chamadas: 0 };
   const vereditos = await emLotes(lugares, CONCORRENCIA, (l) =>
-    consultarLugar(l.obj.maps_search_query, apiKey),
+    consultarLugar(l.obj.maps_search_query, apiKey, contador),
   );
 
   lugares.forEach((l, i) => {
@@ -457,12 +476,14 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
     );
     if (paraHorario.length) {
       const horarios = await emLotes(paraHorario, CONCORRENCIA, (l) =>
-        consultarHorarios(l.obj.place_id, apiKey),
+        consultarHorarios(l.obj.place_id, apiKey, contador),
       );
       paraHorario.forEach((l, i) => horarioDe.set(l.obj, horarios[i]));
       resumo.horarios_verificados = paraHorario.length;
     }
   }
+
+  resumo.chamadas_places = contador.chamadas;
 
   /// true / false / null (sem dado). null nunca conta como fechado.
   const abreNoPeriodo = (obj, dia, periodoBruto) => {
