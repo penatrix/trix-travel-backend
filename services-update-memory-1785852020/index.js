@@ -1,10 +1,13 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
-const { registrarToken } = require('./registra-token');
+const {
+  registrarEvento,
+  statusDoErro,
+} = require('./registra-evento');
 
 // O modelo desta chamada, num lugar só.
 //
-// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// Ele passou a ter nome porque agora é DADO: a linha de `eventos`
 // grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
 // solto dentro da URL, a linha registraria o que alguém digitou no
 // registro e não o que de fato foi chamado -- e a diferença só
@@ -155,6 +158,10 @@ exports.updateTravelerMemory = async (req, res) => {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
+  // Ver o comentário equivalente no generate-trip.
+  const comecou = Date.now();
+  let usoDoGemini = null;
+
   try {
     const { user_id, action_type, old_activity, new_activity } = req.body;
 
@@ -224,6 +231,8 @@ exports.updateTravelerMemory = async (req, res) => {
     if (finishReason && finishReason !== 'STOP') {
       throw new Error(`Gemini interrompeu a resposta (finishReason: ${finishReason}). Resposta incompleta, memória não atualizada.`);
     }
+
+    usoDoGemini = geminiData.usageMetadata ?? null;
 
     let tokenCount = 0;
     if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
@@ -335,14 +344,16 @@ exports.updateTravelerMemory = async (req, res) => {
     console.log(`[TravelerMemory] Memória atualizada com sucesso para ${user_id}. Tokens usados: ${tokenCount}`);
 
     // Este é o único serviço que roda em Flash, e é por isso que a
-    // coluna `model` existe na tabela: sem ela, somar Pro com Flash
+    // coluna `modelo` existe na tabela: sem ela, somar Pro com Flash
     // daria um número que não é preço de nenhum dos dois.
-    registrarToken({
-      kind: 'traveler_memory',
-      tokens: tokenCount,
+    registrarEvento({
+      tipo: 'memoria_viajante',
       tripId: req.body.trip_id,
       userId: user_id,
-      model: MODELO_GEMINI,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - comecou,
+      meta: { acao: action_type || null },
     });
 
     return res.status(200).json({
@@ -356,6 +367,26 @@ exports.updateTravelerMemory = async (req, res) => {
 
   } catch (error) {
     console.error(`[CRÍTICO] Erro em updateTravelerMemory:`, error.message);
+
+    // A falha também é um número -- ver o comentário longo no
+    // generate-trip. Aqui ela tem um valor extra: este serviço já
+    // recebeu JSON truncado por o pensamento comer o `maxOutputTokens`,
+    // e esse desfecho vira linha com status 'erro' e o motivo escrito,
+    // em vez de só uma linha de log que ninguém soma.
+    //
+    // O `user_id` vem do JWT, não do corpo: no caminho do erro o corpo
+    // pode ser justamente o que estava malformado.
+    registrarEvento({
+      tipo: 'memoria_viajante',
+      status: statusDoErro(error),
+      motivo: error.message,
+      tripId: req.body?.trip_id,
+      userId: authPayload?.sub,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - comecou,
+    });
+
     return res.status(500).json({ error: error.message });
   }
 };

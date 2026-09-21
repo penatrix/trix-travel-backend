@@ -2,7 +2,7 @@
   "name": "trix-classify-conflicts",
   "version": "1.0.0",
   "scripts": {
-    "pretest": "cp ../services-generate-trip-trix-1785854447/validar-lugares.js ./validar-lugares.js && cp ../services-generate-trip-trix-1785854447/registra-token.js ./registra-token.js",
+    "pretest": "cp ../services-generate-trip-trix-1785854447/validar-lugares.js ./validar-lugares.js && cp ../services-generate-trip-trix-1785854447/registra-evento.js ./registra-evento.js",
     "test": "node --test"
   },
   "dependencies": {

@@ -60,14 +60,14 @@ const {
 /// mesmos ~8s - folgado dentro do orçamento de 50s do pedido. Enfiar o
 /// prazo aqui exigiria mexer na assinatura daquelas duas, que o
 /// generate-trip também usa, sem ganho nenhum.
-async function avaliarCandidato(candidato, janela, apiKey) {
+async function avaliarCandidato(candidato, janela, apiKey, contador = null) {
   const busca = candidato?.maps_search_query;
 
   if (!apiKey || !busca || !String(busca).trim()) {
     return { candidato, status: 'erro', horario: null, motivo: 'sem chave ou sem busca' };
   }
 
-  const lugar = await consultarLugar(String(busca), apiKey);
+  const lugar = await consultarLugar(String(busca), apiKey, contador);
 
   // Sem place_id não há como pedir horário. Vale para fechado, não
   // encontrado e erro.
@@ -85,7 +85,10 @@ async function avaliarCandidato(candidato, janela, apiKey) {
   // não mandou, ou período que não reconhecemos) o horário fica sem
   // veredito, e o candidato continua elegível.
   const horario = janela
-    ? abreNoPeriodoEmAlgumDia(await consultarHorarios(lugar.placeId, apiKey), janela)
+    ? abreNoPeriodoEmAlgumDia(
+        await consultarHorarios(lugar.placeId, apiKey, contador),
+        janela,
+      )
     : null;
 
   return { candidato, status: 'aberto', horario, nomeGoogle: lugar.nomeGoogle };
@@ -114,7 +117,7 @@ function penalidade(v) {
  * entregar nada, e o `motivo` diz em que condição ele foi escolhido para
  * o log contar a verdade.
  */
-async function escolherCandidato(candidatos, periodoBruto, apiKey) {
+async function escolherCandidato(candidatos, periodoBruto, apiKey, contador = null) {
   const lista = (Array.isArray(candidatos) ? candidatos : [candidatos]).filter(Boolean);
 
   if (lista.length === 0) {
@@ -127,7 +130,7 @@ async function escolherCandidato(candidatos, periodoBruto, apiKey) {
   // Tudo em paralelo: é isto que faz a verificação custar ~1 ida em vez
   // de uma por candidato.
   const vereditos = await Promise.all(
-    lista.map((c) => avaliarCandidato(c, janela, apiKey)),
+    lista.map((c) => avaliarCandidato(c, janela, apiKey, contador)),
   );
 
   let melhor = 0;

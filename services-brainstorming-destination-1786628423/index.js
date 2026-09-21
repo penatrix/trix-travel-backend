@@ -1,10 +1,13 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
-const { registrarToken } = require('./registra-token');
+const {
+  registrarEvento,
+  statusDoErro,
+} = require('./registra-evento');
 
 // O modelo desta chamada, num lugar só.
 //
-// Ele passou a ter nome porque agora é DADO: a linha de `token_usage`
+// Ele passou a ter nome porque agora é DADO: a linha de `eventos`
 // grava qual modelo gastou, e Pro e Flash custam diferente. Com o nome
 // solto dentro da URL, a linha registraria o que alguém digitou no
 // registro e não o que de fato foi chamado -- e a diferença só
@@ -71,6 +74,13 @@ const GEMINI_TIMEOUT_MS = 45 * 1000;
 // NOVO SERVIÇO: GERAÇÃO DE BRAINSTORMING (TOPO DE FUNIL)
 // =================================================================
 exports.generateBrainstorming = async (req, res) => {
+  // Ver o comentário equivalente no generate-trip: o relógio conta o
+  // tempo do handler, e `usoDoGemini`/`usuarioDaSessao` existem em
+  // escopo de handler porque o `catch` também registra.
+  const comecou = Date.now();
+  let usoDoGemini = null;
+  let usuarioDaSessao = null;
+
   let sessionId = null;
 
   try {
@@ -99,6 +109,10 @@ exports.generateBrainstorming = async (req, res) => {
     }
 
     sessionId = sessionRecord.id;
+    // O `catch` precisa saber de quem foi o gasto: falha sem usuário é
+    // linha que não entra em "custo por usuário", que é justamente o
+    // eixo pelo qual o brainstorming aparece.
+    usuarioDaSessao = sessionRecord.user_id ?? null;
     let finalPrompt = sessionRecord.prompt_payload;
 
     // =================================================================
@@ -190,6 +204,8 @@ exports.generateBrainstorming = async (req, res) => {
       );
     }
 
+    usoDoGemini = geminiData.usageMetadata ?? null;
+
     let tokenCount = 0;
     if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
       tokenCount = geminiData.usageMetadata.totalTokenCount;
@@ -221,23 +237,50 @@ exports.generateBrainstorming = async (req, res) => {
     if (updateError) throw updateError;
 
     // A coluna `tokens_used` FICA. A linha nova é acréscimo, e nasce
-    // SEM roteiro de propósito: o brainstorming acontece antes de
-    // existir roteiro, e 80 dos 88 medidos em 18/09 nunca viraram um.
-    // Esse gasto é real e "custo por roteiro" não o enxerga -- por isso
-    // ele entra pelo eixo do usuário.
+    // SEM roteiro de propósito: o brainstorming acontece ANTES de
+    // existir roteiro. Esse gasto é real e "custo por roteiro" não o
+    // enxerga -- por isso ele entra pelo eixo do usuário.
+    //
+    // Uma versão anterior deste comentário dizia que "80 dos 88
+    // brainstormings medidos em 18/09 nunca viraram roteiro". Era
+    // leitura errada: a coluna `trips.brainstorming_id` deixou de ser
+    // gravada em 08/09, quando o fluxo único substituiu os dois
+    // wizards, então o elo estava quebrado, não abandonado. Até 08/09 a
+    // conversão medida era 24 de 82 (29%); depois disso, incalculável.
+    // O app voltou a gravar o vínculo em 20/09 -- a partir daí a
+    // pergunta volta a ter resposta.
     //
     // Sem `await`: contabilidade não segura resposta de usuário.
-    registrarToken({
-      kind: 'brainstorming',
-      tokens: tokenCount,
+    registrarEvento({
+      tipo: 'brainstorming',
       userId: sessionRecord.user_id,
-      model: MODELO_GEMINI,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - comecou,
+      meta: {
+        destinos: brainstormJsonObject.destinations.length,
+        sessao: sessionId ? String(sessionId) : null,
+      },
     });
 
     return res.status(200).json({ success: true });
 
   } catch (error) {
     console.error(`[CRÍTICO] Erro no Brainstorming ${sessionId}:`, error.message);
+
+    // A falha também é um número -- ver o comentário longo no
+    // generate-trip. Roda antes do update para 'failed': se o banco
+    // estiver fora, o evento já saiu.
+    registrarEvento({
+      tipo: 'brainstorming',
+      status: statusDoErro(error),
+      motivo: error.message,
+      userId: usuarioDaSessao,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - comecou,
+      meta: sessionId ? { sessao: String(sessionId) } : null,
+    });
 
     // 4. A REDE DE SEGURANÇA: Reverter para failed
     if (sessionId) {

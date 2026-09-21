@@ -48,8 +48,21 @@ introduza novas variantes visuais sem necessidade.
 
 ## Regras de IA e alucinação
 
-O motor de roteiros é **Gemini 3.1 Pro**. O "me surpreenda" e as trocas
-de atividade usam **Gemini Flash**, por custo.
+O motor de roteiros é **Gemini 3.1 Pro**. Também são Pro o brainstorming
+de destinos, a troca de atividade (`generateMicroActivity`) e a
+classificação de conflito alimentar — Pro ali é decisão de qualidade,
+tomada com os olhos abertos.
+
+**Flash roda em um lugar só:** a destilação da memória do viajante
+(`updateTravelerMemory`). É tarefa de classificação curta, com
+`temperature` 0.2, onde Pro seria desperdício.
+
+Este parágrafo dizia o contrário até 21/09 — que a troca de atividade
+rodava em Flash — e era falso: o `MODELO_GEMINI` dos cinco serviços
+mostra Pro em quatro. O erro importa porque Pro e Flash têm preços
+diferentes, e é exatamente por isso que a tabela `eventos` grava a
+coluna `modelo`: somar os dois daria um número que não é preço de
+nenhum deles.
 
 Princípios inegociáveis:
 
