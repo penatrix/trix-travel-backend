@@ -7,6 +7,7 @@ const {
   registrarEvento,
   statusDoErro,
 } = require('./registra-evento');
+const { montarUrlDoAutocomplete } = require('./montar-url-do-autocomplete');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -102,8 +103,11 @@ exports.searchPlaces = async (req, res) => {
   }
 
   // 3. Monta a URL do Google usando a chave que já está nas suas variáveis
+  //
+  // A escolha de `types` mora em `montar-url-do-autocomplete.js` -- ver
+  // lá o porquê de `(regions)` e não `(cities)`, e o que isso muda.
   const apiKey = process.env.GOOGLE_MAPS_KEY;
-  const googleUrl = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${encodeURIComponent(input)}&types=(cities)&language=${lang}&key=${apiKey}`;
+  const googleUrl = montarUrlDoAutocomplete(input, lang, apiKey);
 
   // 4. Chama o Google e devolve para o FlutterFlow
   try {
