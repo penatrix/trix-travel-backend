@@ -2,7 +2,8 @@
   "name": "trix-trip-generator",
   "version": "1.0.0",
   "scripts": {
-    "pretest": "cp ../services-generate-trip-trix-1785854447/registra-evento.js ./registra-evento.js"
+    "pretest": "cp ../services-generate-trip-trix-1785854447/registra-evento.js ./registra-evento.js",
+    "test": "node --test"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
