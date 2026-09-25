@@ -1,0 +1,82 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras pastas -- o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 25/09)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito: erra alto em vez de
+# criar um serviço duplicado em silêncio. Então, uma vez só, à mão:
+#
+#   1. Criar o serviço `suggest-cities` no Cloud Run, em europe-west1.
+#      O app chama https://suggest-cities-1016948893404.europe-west1.run.app,
+#      então o NOME precisa ser exatamente este.
+#   2. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   3. Variáveis de ambiente:
+#        SUPABASE_JWT_SECRET        para validar o token do app
+#        GEMINI_API_KEY             para a chamada ao Flash
+#        SUPABASE_URL e
+#        SUPABASE_SERVICE_ROLE_KEY  só para o `registra-evento` gravar a
+#                                   linha de custo; sem elas o serviço
+#                                   funciona e o log avisa
+#   4. O `check` da coluna `tipo` da tabela `eventos` precisa aceitar
+#      'sugestao_cidades'. Sem isso a sugestão funciona e a linha de
+#      custo volta 400 -- o módulo avisa no log, não derruba nada.
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: suggestCities
+  _SERVICE_NAME: suggest-cities
+  _REGION: europe-west1
+
+steps:
+  # O registra-evento.js vive na pasta do generate-trip. O contexto do
+  # `pack` é a pasta do serviço (`--path=.`), então ele é copiado para cá
+  # ANTES do build -- sem isto o build passa e a revisão quebra no
+  # require. Mesma origem do `pretest` do package.json.
+  - id: copia-registra-evento
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/registra-evento.js
+      - services-suggest-cities/registra-evento.js
+
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-suggest-cities
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA
+      - --region=${_REGION}
+      # O handler corta o Gemini em 12s. Este teto precisa ser MAIOR, senão
+      # quem corta é a plataforma, sem log e sem resposta.
+      - --timeout=30
+
+images:
+  - gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY

@@ -1,0 +1,11 @@
+{
+  "name": "trix-suggest-cities",
+  "version": "1.0.0",
+  "scripts": {
+    "pretest": "cp ../services-generate-trip-trix-1785854447/registra-evento.js ./registra-evento.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "jsonwebtoken": "^9.0.2"
+  }
+}
