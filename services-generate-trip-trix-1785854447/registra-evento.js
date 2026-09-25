@@ -86,6 +86,10 @@ const TIPOS = new Set([
   'emenda_restricao',
   'memoria_viajante',
   'busca_lugares',
+  // O Flash do passo 3 do wizard (25/09). O `check` da coluna no banco
+  // precisa aceitar este valor, senão a linha volta 400 e o módulo só
+  // avisa no log -- ver o services-suggest-cities/cloudbuild.yaml.
+  'sugestao_cidades',
 ]);
 
 const STATUS = new Set(['ok', 'erro', 'timeout']);

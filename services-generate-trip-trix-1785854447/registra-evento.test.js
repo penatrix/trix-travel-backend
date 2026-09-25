@@ -292,7 +292,7 @@ describe('a lista de tipos é a do banco', () => {
     assert.ok(avisos.some((a) => a.includes('generate_trip')));
   });
 
-  test('os seis tipos do backend são exatamente estes', async () => {
+  test('os sete tipos do backend são exatamente estes', async () => {
     // A coluna aceita mais -- `roteiro_aberto`, `checklist_marcado` e os
     // outros vêm do app, pela RPC `registrar_evento_do_app`. Aqui só
     // entra o que custa dinheiro numa API externa.
@@ -304,6 +304,7 @@ describe('a lista de tipos é a do banco', () => {
         'emenda_restricao',
         'geracao_roteiro',
         'memoria_viajante',
+        'sugestao_cidades',
         'troca_atividade',
       ],
     );
