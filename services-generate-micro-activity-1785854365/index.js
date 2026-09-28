@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 // Chega aqui por um passo de cópia no cloudbuild (id `copia-validacao`) e,
 // no desenvolvimento local, pelo `pretest` do package.json.
 const { escolherCandidato } = require('./escolher-candidato');
+const { montarPromptDaTroca, lerParametros } = require('./prompt-da-troca');
 const {
   registrarEvento,
   contadorDePlaces,
@@ -191,20 +192,42 @@ exports.generateMicroActivity = async (req, res) => {
   const comecou = Date.now();
   const contador = contadorDePlaces();
   let usoDoGemini = null;
+  let origemDoPrompt = null;
 
   try {
-    // Agora o Cloud Run não pensa, só recebe o prompt pronto do FlutterFlow
-    // `period` é OPCIONAL de propósito. Ele só existe no corpo depois que
-    // o app novo subir, e o backend precisa continuar servindo o app
-    // antigo enquanto isso - sem ele a checagem de horário simplesmente
-    // não roda, e a de fechamento continua valendo.
-    const { promptText, period: periodo } = req.body;
+    // =============================================================
+    // O PROMPT
+    //
+    // Desde 28/09 quem monta é este serviço (`prompt-da-troca.js`), a
+    // partir de parâmetros: o template saiu do bundle do app, e o cliente
+    // deixou de escolher a instrução que vai para o Gemini Pro.
+    //
+    // O `promptText` pronto continua aceito, e só por um motivo: app
+    // aberto antes do deploy ainda o manda, até recarregar. É o mesmo
+    // desenho de transição do `period` e da lista de candidatos. A
+    // linha de `eventos` grava qual dos dois caminhos veio (`meta.prompt`),
+    // e quando o `legado` zerar este ramo sai -- enquanto ele existir, o
+    // handler segue aceitando texto livre de quem tem JWT.
+    //
+    // `period` é opcional no caminho legado: sem ele a checagem de
+    // horário não roda e a de fechamento continua valendo. No caminho
+    // novo ele é obrigatório, porque o prompt não se monta sem.
+    // =============================================================
+    const parametros = lerParametros(req.body);
+    const legado = !parametros && typeof req.body?.promptText === 'string'
+      && req.body.promptText.trim() !== ''
+      ? req.body.promptText
+      : null;
 
-    if (!promptText) {
-      return res.status(400).json({ error: 'O promptText é obrigatório.' });
+    if (!parametros && !legado) {
+      return res.status(400).json({ error: 'Faltam a cidade e o período da atividade.' });
     }
 
-    console.log(`[MicroActivity] Iniciando requisição para o Gemini...`);
+    origemDoPrompt = parametros ? 'backend' : 'legado';
+    const promptText = parametros ? montarPromptDaTroca(parametros) : legado;
+    const periodo = parametros ? parametros.periodo : req.body.period;
+
+    console.log(`[MicroActivity] Iniciando requisição para o Gemini (prompt ${origemDoPrompt})...`);
 
     const { sugestao: bruto, uso } = await pedirSugestao(promptText, TETO_GEMINI_MS);
     usoDoGemini = uso;
@@ -213,12 +236,9 @@ exports.generateMicroActivity = async (req, res) => {
     // =============================================================
     // OS CANDIDATOS
     //
-    // O prompt novo pede uma lista ranqueada de 3. Mas o prompt vive no
-    // CLIENTE, e mudança de prompt do cliente só vale depois de o app
-    // recarregar - e os dois sobem separados. Então este handler aceita
-    // as DUAS formas: a lista nova e o objeto único do app antigo,
-    // tratado como lista de um. Sem isso, subir o backend antes do app
-    // quebraria a troca de atividade para todo mundo.
+    // O prompt pede uma lista ranqueada de 3. O objeto único é de um
+    // prompt ainda mais antigo, que só chega pelo caminho legado; ele é
+    // tratado como lista de um, e sai junto com o `promptText`.
     // =============================================================
     const candidatos = Array.isArray(bruto?.suggestions)
       ? bruto.suggestions
@@ -288,6 +308,9 @@ exports.generateMicroActivity = async (req, res) => {
         // `degradado` é o que diz se três candidatos estão bastando.
         // Era só log; agora é série temporal.
         degradado: !!escolha.degradado,
+        // `backend` ou `legado`. Quando o legado zerar, o ramo do
+        // `promptText` sai do handler.
+        prompt: origemDoPrompt,
       },
     });
 
@@ -311,6 +334,7 @@ exports.generateMicroActivity = async (req, res) => {
       uso: usoDoGemini,
       chamadasPlaces: contador.chamadas,
       duracaoMs: Date.now() - comecou,
+      meta: { prompt: origemDoPrompt },
     });
 
     return res.status(500).json({ error: error.message });
