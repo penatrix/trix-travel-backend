@@ -13,8 +13,9 @@
 // nova chamada de IA.
 //
 // Usa a API legada do Places (maps.googleapis.com), mesma família do
-// autocomplete que já funciona com a GOOGLE_MAPS_KEY atual. A Places API
-// (New) exigiria habilitar outro serviço no GCP.
+// autocomplete que já funciona com a GOOGLE_MAPS_KEY atual -- e, com
+// PLACES_API_NOVA=1, a Places API (New) na busca do lugar. Ver
+// `consultarLugarNovo`.
 // =====================================================================
 
 const CONCORRENCIA = 5;        // consultas simultâneas ao Google
@@ -279,7 +280,84 @@ function valorBrl(texto) {
 
 /// Consulta um lugar pelo texto de busca. Devolve sempre um objeto - nunca
 /// lança - porque falha de rede não pode derrubar a geração inteira.
+///
+/// Com `PLACES_API_NOVA=1` a busca vai para a Places API (New). Sem a
+/// variável, fica a legada. A troca é por variável, e não por código,
+/// porque ela muda como o nome do lugar casa -- e lugar fechado é o pior
+/// bug do produto. Primeiro compara-se (`scripts/compara-places.js`),
+/// depois liga-se, e desligar é só apagar a variável.
 async function consultarLugar(textoBusca, apiKey, contador = null) {
+  if (process.env.PLACES_API_NOVA === '1') {
+    return consultarLugarNovo(textoBusca, apiKey, contador);
+  }
+  return consultarLugarLegado(textoBusca, apiKey, contador);
+}
+
+// ---------------------------------------------------------------------
+// A busca pela Places API (New)
+//
+// Medido no faturamento em 21/09: 61% do que o Places custa é Contact e
+// Atmosphere Data -- telefone, site, nota e avaliação que ninguém lê. O
+// Text Search legado não aceita `fields` e cobra tudo. A API nova cobra
+// pelo campo pedido na máscara, e esta só pede os três que o código usa:
+// o id (vira `place_id` e alimenta o horário), o nome (vai para o
+// `nome_google` do classify-conflicts) e o status.
+//
+// O `place_id` da API nova é o mesmo da legada, então o Details legado
+// do `consultarHorarios` continua funcionando com ele.
+// ---------------------------------------------------------------------
+
+const URL_TEXT_SEARCH_NOVO = 'https://places.googleapis.com/v1/places:searchText';
+const CAMPOS_DO_TEXT_SEARCH = 'places.id,places.displayName,places.businessStatus';
+
+/// Lê a resposta do Text Search (New) no mesmo formato de veredito da
+/// legada. Pura, para o teste exercitar sem rede.
+function lerTextSearchNovo(dados) {
+  const primeiro = dados?.places?.[0];
+  // Sem resultado a API nova devolve `{}`, e não um status ZERO_RESULTS.
+  if (!primeiro) return { veredito: 'nao_encontrado' };
+
+  const status = primeiro.businessStatus;
+  if (!status) {
+    return { veredito: 'aberto', placeId: primeiro.id, semStatus: true };
+  }
+  return {
+    veredito: FECHADO.has(status) ? 'fechado' : 'aberto',
+    status,
+    placeId: primeiro.id,
+    nomeGoogle: primeiro.displayName?.text,
+  };
+}
+
+async function consultarLugarNovo(textoBusca, apiKey, contador = null) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+
+  try {
+    if (contador) contador.chamadas += 1;
+    const resposta = await fetch(URL_TEXT_SEARCH_NOVO, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': CAMPOS_DO_TEXT_SEARCH,
+      },
+      body: JSON.stringify({ textQuery: textoBusca, pageSize: 1 }),
+    });
+    if (!resposta.ok) {
+      return { veredito: 'erro', motivo: `HTTP ${resposta.status}` };
+    }
+    return lerTextSearchNovo(await resposta.json());
+  } catch (erro) {
+    return { veredito: 'erro', motivo: erro.name === 'AbortError' ? 'timeout' : erro.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/// A busca pela API legada, como sempre foi.
+async function consultarLugarLegado(textoBusca, apiKey, contador = null) {
   const url =
     'https://maps.googleapis.com/maps/api/place/textsearch/json' +
     `?query=${encodeURIComponent(textoBusca)}&key=${apiKey}`;
@@ -648,6 +726,11 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
 module.exports = {
   validarEConsertarRoteiro,
   consultarLugar,
+  // As duas buscas, separadas, para o `scripts/compara-places.js` rodar
+  // as duas contra os mesmos lugares; e o leitor da nova, para teste.
+  consultarLugarNovo,
+  consultarLugarLegado,
+  lerTextSearchNovo,
   // Usado também pelo generate-micro-activity, que recebe este arquivo por
   // um passo de cópia no cloudbuild dele. Este módulo é autocontido
   // (nenhum `require`) de propósito - é o que torna a cópia possível.
