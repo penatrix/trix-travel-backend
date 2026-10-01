@@ -4,6 +4,7 @@ const {
   registrarEvento,
   statusDoErro,
 } = require('./registra-evento');
+const { montarPromptDoBrainstorming } = require('./prompt-do-brainstorming');
 
 // O modelo desta chamada, num lugar só.
 //
@@ -80,6 +81,7 @@ exports.generateBrainstorming = async (req, res) => {
   const comecou = Date.now();
   let usoDoGemini = null;
   let usuarioDaSessao = null;
+  let origemDoPrompt = null;
 
   let sessionId = null;
 
@@ -113,7 +115,22 @@ exports.generateBrainstorming = async (req, res) => {
     // linha que não entra em "custo por usuário", que é justamente o
     // eixo pelo qual o brainstorming aparece.
     usuarioDaSessao = sessionRecord.user_id ?? null;
-    let finalPrompt = sessionRecord.prompt_payload;
+
+    // O PROMPT. Desde 28/09 quem monta é este serviço, a partir das
+    // colunas da linha (`prompt-do-brainstorming.js`): o template saiu do
+    // bundle do app e deixou de ser gravado em linha de leitura pública.
+    //
+    // O `prompt_payload` pronto continua valendo quando vem preenchido,
+    // e só por um motivo: app aberto antes do deploy ainda o grava, até
+    // recarregar. O evento registra qual dos dois caminhos veio
+    // (`meta.prompt`), e quando o `legado` zerar este ramo e a coluna
+    // saem.
+    const legado = typeof sessionRecord.prompt_payload === 'string'
+      && sessionRecord.prompt_payload.trim() !== '';
+    origemDoPrompt = legado ? 'legado' : 'backend';
+    let finalPrompt = legado
+      ? sessionRecord.prompt_payload
+      : montarPromptDoBrainstorming(sessionRecord);
 
     // =================================================================
     // ENGENHARIA DE PROMPT DINÂMICA (TRATAMENTO DO 'REFUSED')
@@ -260,6 +277,7 @@ exports.generateBrainstorming = async (req, res) => {
       meta: {
         destinos: brainstormJsonObject.destinations.length,
         sessao: sessionId ? String(sessionId) : null,
+        prompt: origemDoPrompt,
       },
     });
 
@@ -279,7 +297,7 @@ exports.generateBrainstorming = async (req, res) => {
       modelo: MODELO_GEMINI,
       uso: usoDoGemini,
       duracaoMs: Date.now() - comecou,
-      meta: sessionId ? { sessao: String(sessionId) } : null,
+      meta: sessionId ? { sessao: String(sessionId), prompt: origemDoPrompt } : null,
     });
 
     // 4. A REDE DE SEGURANÇA: Reverter para failed
