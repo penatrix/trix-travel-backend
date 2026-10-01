@@ -69,3 +69,11 @@ test('o handler monta aqui quando a linha não traz o prompt, e diz qual veio', 
   assert.match(fonte, /: montarPromptDoBrainstorming\(sessionRecord\);/);
   assert.match(fonte, /prompt: origemDoPrompt/);
 });
+
+test('o teto por pessoa vira limite duro, e só quando existe', () => {
+  const com = montarPromptDoBrainstorming({ budget_limit_per_person: 12000 });
+  assert.match(com, /HARD BUDGET LIMIT: BRL 12000 per person/);
+  for (const sem of [{}, { budget_limit_per_person: null }, { budget_limit_per_person: 0 }]) {
+    assert.doesNotMatch(montarPromptDoBrainstorming(sem), /HARD BUDGET LIMIT/);
+  }
+});
