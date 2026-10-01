@@ -116,7 +116,7 @@ exports.generateBrainstorming = async (req, res) => {
     // eixo pelo qual o brainstorming aparece.
     usuarioDaSessao = sessionRecord.user_id ?? null;
 
-    // O PROMPT. Desde 28/09 quem monta é este serviço, a partir das
+    // O PROMPT. Desde 01/10 quem monta é este serviço, a partir das
     // colunas da linha (`prompt-do-brainstorming.js`): o template saiu do
     // bundle do app e deixou de ser gravado em linha de leitura pública.
     //

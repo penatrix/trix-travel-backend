@@ -1,6 +1,6 @@
 // O prompt do brainstorming de destinos, montado aqui a partir da linha.
 //
-// Até 28/09 ele era montado pelo `buildBrainstormingPrompt`, no
+// Até 01/10 ele era montado pelo `buildBrainstormingPrompt`, no
 // `custom_functions.dart` do app, e gravado pronto na coluna
 // `prompt_payload`. Dois vazamentos com isso:
 //
