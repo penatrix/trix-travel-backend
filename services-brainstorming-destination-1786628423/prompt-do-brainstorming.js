@@ -84,6 +84,18 @@ function montarPromptDoBrainstorming(linha) {
       + 'lives in Brazil, so do NOT suggest Brazilian destinations.';
   }
 
+  // O teto do "Jeito de gastar", por pessoa, desde 01/10. Sem ele o nível
+  // sozinho ("Comfort") deixava passar destino de R$ 25 mil para quem
+  // disse R$ 12 mil. Só entra quando é um número positivo: o caso sem teto
+  // continua com o prompt de antes, letra por letra.
+  const teto = Number(l.budget_limit_per_person);
+  const budgetBlock = Number.isFinite(teto) && teto > 0
+    ? `\n\nHARD BUDGET LIMIT: BRL ${Math.round(teto)} per person for the WHOLE trip, `
+      + 'transport from origin included. Every estimated_cost_per_person_brl '
+      + 'MUST be at or below this limit. If a destination cannot fit it, do '
+      + 'not suggest it.'
+    : '';
+
   const pedido = texto(l.special_request).trim().slice(0, MAX_PEDIDO);
   const requestBlock = pedido === ''
     ? ''
@@ -100,7 +112,7 @@ function montarPromptDoBrainstorming(linha) {
 - Interests and "Vibes" liked by the user: ${vibes}
 
 Your mission: Suggest 3 incredible destinations (can be specific cities or small routes/regions that make sense for the number of days).
-CRITICAL: Strictly evaluate the seasonality and weather. Do NOT suggest destinations with extreme weather or monsoons during the indicated period (${travelDates}). The budget style (${finalBudgetStyle}) must also be realistic for the destination. To define estimated cost, you MUST consider the transport from origin city, if specified: ${finalOrigin}.${scopeBlock}${requestBlock}${forbiddenBlock}
+CRITICAL: Strictly evaluate the seasonality and weather. Do NOT suggest destinations with extreme weather or monsoons during the indicated period (${travelDates}). The budget style (${finalBudgetStyle}) must also be realistic for the destination. To define estimated cost, you MUST consider the transport from origin city, if specified: ${finalOrigin}.${budgetBlock}${scopeBlock}${requestBlock}${forbiddenBlock}
 
 Your response MUST be EXCLUSIVELY a raw JSON object, without markdown formatting or code blocks. Strictly follow this exact SCHEMA. 
 CRITICAL: The JSON keys MUST remain exactly as written in English. ONLY the generated values/content MUST BE IN ${targetLanguage}:
