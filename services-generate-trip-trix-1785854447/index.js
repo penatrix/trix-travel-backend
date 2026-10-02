@@ -2,6 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
 const { montarPromptDaGeracao } = require('./prompt-da-geracao');
+const { normalizarPassagem } = require('./passagem-de-origem');
 const {
   registrarEvento,
   statusDoErro,
@@ -182,6 +183,8 @@ exports.generateTrip = async (req, res) => {
   // De onde veio o texto do prompt: 'backend' (montado aqui, a partir das
   // colunas) ou 'legado' (o `prompt_payload` que o app antigo grava).
   let origemDoPrompt = null;
+  // O resultado do `normalizarPassagem`, para o log e o evento.
+  let passagem = null;
 
   try {
     if (!verifyWebhookSecret(req)) {
@@ -401,6 +404,18 @@ exports.generateTrip = async (req, res) => {
     // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
     const tripJsonObject = JSON.parse(cleanText);
 
+    // 2.4. A ida e volta da origem pelo grupo todo. O modelo dá o valor por
+    // pessoa e o meio (`origin_transfer`); a multiplicação é daqui, porque
+    // a dele não acompanhava o número de viajantes. Antes da validação de
+    // lugares, que também ajusta o total pela diferença.
+    passagem = normalizarPassagem(tripJsonObject, Number(tripAtual?.travelers_count));
+    if (passagem) {
+      console.log(
+        `[Passagem] Trip ${tripId}: ${passagem.modo ?? 'meio inválido'}, ` +
+        `${passagem.de ?? '-'} -> ${passagem.para ?? 'sem valor por pessoa'}.`,
+      );
+    }
+
     // 2.5. Validação de status dos lugares, ANTES de virar 'ready'.
     //
     // O Gemini escreve a partir do treinamento: não tem como saber que um
@@ -505,6 +520,9 @@ exports.generateTrip = async (req, res) => {
         ritmo: tripAtual?.pace_level || null,
         atividades: contarAtividades(tripJsonObject),
         prompt: origemDoPrompt,
+        // O meio da ida e volta, para medir quanto roteiro sai de ônibus
+        // ou carro. Nulo sem cidade de origem.
+        passagem: passagem?.modo ?? null,
       },
     });
 

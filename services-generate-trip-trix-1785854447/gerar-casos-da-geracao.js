@@ -1,10 +1,10 @@
 // Gera `prompt-da-geracao.casos.json`: entradas e o prompt que este
 // serviço monta para cada uma.
 //
-// O mesmo arquivo vive no app, em `test/fixtures/`, e lá o
-// `buildGeminiPrompt` do Dart tem que produzir EXATAMENTE o `esperado`.
-// Rode `node gerar-casos-da-geracao.js` quando o prompt mudar de
-// propósito, e copie o JSON para o app no mesmo par de PRs.
+// Até 02/10 o mesmo arquivo vivia no app, que conferiu o `buildGeminiPrompt`
+// do Dart contra ele antes de o Dart sair. Agora é a regressão deste
+// serviço: rode `node gerar-casos-da-geracao.js` quando o prompt mudar de
+// propósito, e só então.
 
 'use strict';
 

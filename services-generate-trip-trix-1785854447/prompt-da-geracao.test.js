@@ -59,14 +59,14 @@ test('as datas provisórias não viram datas fixas', () => {
 
 test('o teto é do grupo, e sem teto não se inventa um', () => {
   const base = casos[0].linha;
-  assert.match(montarPromptDaGeracao(base), /Total Budget: BRL 16000 for the WHOLE trip, airfare included/);
+  assert.match(montarPromptDaGeracao(base), /Total Budget: BRL 16000 for the WHOLE trip, the round trip from home included/);
   assert.match(montarPromptDaGeracao({ ...base, budget_limit: null }), /Total Budget: Not specified/);
 });
 
 test('sem origem, a passagem é zero e não se inventa tarifa', () => {
   const base = casos[0].linha;
   assert.match(montarPromptDaGeracao({ ...base, origin_city: '  ' }), /origin city is UNKNOWN, so set this to 0/);
-  assert.match(montarPromptDaGeracao(base), /departing from São Paulo/);
+  assert.match(montarPromptDaGeracao(base), /São Paulo to the first city, and the last city back to São Paulo/);
 });
 
 test('o handler monta aqui quando a row não traz o prompt, e diz qual veio', () => {
@@ -200,5 +200,5 @@ test('o nível e o teto do jeito de gastar chegam ao prompt', () => {
   // De `jeito_de_gastar_test.dart`: o teto é do GRUPO, e o nível é o
   // canônico que a row grava.
   const p = montarPromptDaGeracao({ ...casos[0].linha, budget_level: 'Premium', budget_limit: 24000 });
-  assert.match(p, /Total Budget: BRL 24000 for the WHOLE trip, airfare included \(Level: Premium\)/);
+  assert.match(p, /Total Budget: BRL 24000 for the WHOLE trip, the round trip from home included \(Level: Premium\)/);
 });
