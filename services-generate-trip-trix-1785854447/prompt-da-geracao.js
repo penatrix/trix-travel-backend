@@ -226,7 +226,22 @@ function montarPromptDaGeracao(linha, travelDna) {
   const origemLimpa = texto(originCity).trim();
   const linhaPassagem = origemLimpa === ''
     ? `"flights": the traveler's origin city is UNKNOWN, so set this to 0 and do NOT invent a fare.`
-    : `"flights": round-trip airfare for the whole group, departing from ${origemLimpa} to the first city and returning from the last. Estimate a realistic economy fare for these dates.`;
+    : `"flights": getting there and back for the whole group: ${origemLimpa} to the first city, and the last city back to ${origemLimpa}. Use the way people realistically make that trip: a flight when that is how it is done, bus or car when the road trip takes about 6 hours or less each way (car = fuel and tolls for one car, split among the group). Fill "origin_transfer" first, then set this to its "per_person_brl" multiplied by ${travelers ?? 1}.`;
+  // A ida e volta da origem, POR PESSOA, num objeto próprio. A conta pelo
+  // grupo quem faz é o `passagem-de-origem.js`: medido em 02/10, o modelo
+  // devolvia o mesmo número redondo para 1 e 2 viajantes (333 e 335).
+  // Sem origem não há o que pedir: o `flights` é 0 e o objeto não existe.
+  const regraOrigem = origemLimpa === ''
+    ? ''
+    : `  - You MUST include an "origin_transfer" object at the root: "mode" is EXACTLY one of flight, train, bus, car, ferry (in English), and "per_person_brl" is the integer round-trip cost for ONE traveler, in BRL.
+`;
+  const schemaOrigem = origemLimpa === ''
+    ? ''
+    : `
+    "origin_transfer": {
+      "mode": "flight, train, bus, car or ferry",
+      "per_person_brl": "integer: the round trip for ONE traveler"
+    },`;
   const trasladoBlock = `  TRAVEL BETWEEN CITIES (an itinerary that teleports the traveler is not real):
   - Every destination AFTER the first MUST carry an "arrival_transfer" object: how the group gets there from the previous destination. The first destination has none.
     * "from": the previous city, localized. "mode": EXACTLY one of flight, train, bus, car, ferry (in English). "duration": door to door (e.g. "3h30"). "cost_estimate": same pattern as activities (${costExample}). "how_to_book": one sentence with the company or site and when to buy, in ${targetLanguage}.
@@ -242,11 +257,11 @@ function montarPromptDaGeracao(linha, travelDna) {
     * "food_not_listed": meals the traveler will realistically eat that are NOT already in the itinerary as activities. Never count a restaurant you already listed - that one is in activities_and_tickets.
     * "local_transport": airport transfers, metro, taxi, and any bus or flight BETWEEN the cities of this trip.
   - "estimated_cost_brl" MUST be the exact arithmetic sum of those five values. Add them up - do not estimate the total on its own, and do not leave anything out of the five lines.
-`;
+${regraOrigem}`;
 
   const budgetText = (budget.trim() === '')
     ? 'Not specified'
-    : `BRL ${budget.trim()} for the WHOLE trip, airfare included`;
+    : `BRL ${budget.trim()} for the WHOLE trip, the round trip from home included`;
 
   // 5. O prompt.
   return `You are an elite, highly sought-after local travel concierge. Your job is to create a highly specific, actionable, and hyper-personalized multi-destination itinerary.
@@ -316,7 +331,7 @@ ${backupBlock}
       "activities_and_tickets": 2600,
       "food_not_listed": 1000,
       "local_transport": 500
-    },
+    },${schemaOrigem}
     "concierge": {
       "quick_facts": [
         {
