@@ -1,6 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
+const { montarPromptDaGeracao } = require('./prompt-da-geracao');
 const {
   registrarEvento,
   statusDoErro,
@@ -178,6 +179,9 @@ exports.generateTrip = async (req, res) => {
   // algo que nunca foi cobrado.
   let userId = null;
   let cotaConsumida = false;
+  // De onde veio o texto do prompt: 'backend' (montado aqui, a partir das
+  // colunas) ou 'legado' (o `prompt_payload` que o app antigo grava).
+  let origemDoPrompt = null;
 
   try {
     if (!verifyWebhookSecret(req)) {
@@ -234,9 +238,13 @@ exports.generateTrip = async (req, res) => {
       // `dias x ritmo`, não dias -- sem esses três, um mês caro fica
       // sem explicação e a única saída é reabrir o Cloud Logging.
       // Mesma ida ao banco, três colunas a mais.
+      // As outras colunas são os PARÂMETROS do prompt, que desde a fase B
+      // é montado aqui (`prompt-da-geracao.js`), e não mais no app.
       .select(
         'id, user_id, status, prompt_payload, start_date, ' +
-        'end_date, travelers_count, pace_level',
+        'end_date, travelers_count, pace_level, is_date_set, ' +
+        'budget_limit, budget_level, vibe_tags, special_request, ' +
+        'user_language, origin_city, planned_destinations',
       )
       .eq('id', tripRecord.id)
       .maybeSingle();
@@ -259,7 +267,31 @@ exports.generateTrip = async (req, res) => {
 
     tripId = tripAtual.id;
     userId = tripAtual.user_id;
-    const promptText = tripAtual.prompt_payload;
+
+    // O PROMPT. Desde a fase B quem monta é este serviço, a partir das
+    // colunas da row e do Travel DNA do dono. O `prompt_payload` pronto
+    // continua valendo quando vem preenchido, e só por um motivo: app
+    // aberto antes do deploy ainda o grava, até recarregar. Quando a
+    // `eventos` não mostrar mais `meta.prompt = 'legado'`, este ramo e a
+    // coluna saem.
+    const legado = typeof tripAtual.prompt_payload === 'string'
+      && tripAtual.prompt_payload.trim() !== '';
+    origemDoPrompt = legado ? 'legado' : 'backend';
+    let promptText = tripAtual.prompt_payload;
+    if (!legado) {
+      // O mesmo `travel_dna` que o app lia do perfil de quem gera. Sem
+      // linha em `users` (sessão anônima recém-criada), segue sem perfil,
+      // como o app fazia.
+      const { data: dono, error: donoError } = await supabase
+        .from('users')
+        .select('travel_dna')
+        .eq('id', tripAtual.user_id)
+        .maybeSingle();
+      if (donoError) {
+        throw new Error(`Falha ao ler o perfil do dono da trip ${tripRecord.id}: ${donoError.message}`);
+      }
+      promptText = montarPromptDaGeracao(tripAtual, dono?.travel_dna ?? null);
+    }
 
     // =================================================================
     // P1.2: TRAVA DO PLANO GRATUITO
@@ -472,6 +504,7 @@ exports.generateTrip = async (req, res) => {
         viajantes: Number(tripAtual?.travelers_count) || null,
         ritmo: tripAtual?.pace_level || null,
         atividades: contarAtividades(tripJsonObject),
+        prompt: origemDoPrompt,
       },
     });
 
@@ -516,6 +549,7 @@ exports.generateTrip = async (req, res) => {
       uso: usoDoGemini,
       chamadasPlaces,
       duracaoMs: Date.now() - comecou,
+      meta: origemDoPrompt ? { prompt: origemDoPrompt } : null,
     });
 
     // 4. A REDE DE SEGURANÇA: Se temos um tripId, avisamos o app que falhou
