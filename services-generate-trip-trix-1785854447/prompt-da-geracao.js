@@ -8,10 +8,10 @@
 // O TEXTO É O MESMO, letra por letra. Os blocos literais deste arquivo
 // foram EXTRAÍDOS do fonte Dart por script, e não copiados à mão; a lógica
 // em volta (dias, densidade, backups, perfil) foi transcrita função por
-// função. Quem prova que bateu é o CI do app: o
-// `test/prompt_da_geracao_paridade_test.dart` chama o `buildGeminiPrompt`
-// com as entradas de `prompt-da-geracao.casos.json` e exige o mesmo texto
-// que este módulo produz. Enquanto o Dart existir, divergência é bug.
+// função. A prova foi o CI do app, que chamou o `buildGeminiPrompt` com as
+// entradas de `prompt-da-geracao.casos.json` e exigiu o mesmo texto deste
+// módulo nos nove casos (app #215). Na fase B (02/10) o Dart saiu, e este
+// é o único construtor.
 //
 // Entrada: a linha de `trips` (as colunas abaixo) e o `travel_dna` do dono,
 // que mora em `users` e é lido pelo handler com service_role.
@@ -28,6 +28,10 @@
 'use strict';
 
 // O RitmoDaViagem do app (`lib/flutter_flow/ritmo_da_viagem.dart`).
+// O número de paradas é PROMESSA na tela do app ("Duas paradas por dia")
+// e ordem aqui ("EXACTLY 2 activities per day"). As duas cópias vivem em
+// repositórios diferentes e nada as compara: cada lado trava os seus
+// números em teste. Mexeu num, mexa no outro.
 const RITMOS = [
   { canonico: 'Chill', rotuloPt: 'Sem pressa', paradas: 2,
     distribuicao: '1 in the first period, 1 in the second' },
