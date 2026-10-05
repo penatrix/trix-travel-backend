@@ -1,0 +1,76 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras pastas -- o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts.
+#
+# Sem passo de cópia: este serviço não usa o `registra-evento` nem o
+# `validar-lugares`, porque não chama o Gemini.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 05/10)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito. Uma vez só, à mão:
+#
+#   1. Criar o serviço `token-da-apple` no Cloud Run, em europe-west1.
+#      O app chama https://token-da-apple-1016948893404.europe-west1.run.app,
+#      então o NOME precisa ser exatamente este.
+#   2. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   3. Variáveis de ambiente:
+#        SUPABASE_JWT_SECRET        para validar o token do app
+#        SUPABASE_URL e
+#        SUPABASE_SERVICE_ROLE_KEY  para ler a conta e gravar o token
+#        APPLE_TEAM_ID              9YDU67FKQM
+#        APPLE_KEY_ID               o Key ID da chave do Sign in with Apple
+#        APPLE_PRIVATE_KEY          o conteúdo do .p8, PELO SECRET MANAGER
+#                                   (variável a partir de segredo), nunca
+#                                   colado como texto
+#   4. A tabela `tokens_da_apple` (scripts/p3.8 do app) precisa existir.
+#
+# Sem uma das variáveis o serviço responde 500 e o log diz qual falta.
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: tokenDaApple
+  _SERVICE_NAME: token-da-apple
+  _REGION: europe-west1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-token-da-apple
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-token-da-apple:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-token-da-apple:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-token-da-apple:$COMMIT_SHA
+      - --region=${_REGION}
+      # As chamadas externas têm teto de 8s cada, e são no máximo três em
+      # sequência. Este teto precisa ser maior, senão quem corta é a
+      # plataforma, sem log e sem resposta.
+      - --timeout=30
+
+images:
+  - gcr.io/$PROJECT_ID/trix-token-da-apple:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
