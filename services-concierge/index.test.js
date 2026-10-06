@@ -114,6 +114,7 @@ test('roteiro de outra pessoa: 403, e o Gemini não é chamado', async () => {
 test('o membro do roteiro conversa', async () => {
   respostas.push({ corpo: [{ ...ROTEIRO, user_id: 'dono' }] });
   respostas.push({ corpo: [{ id: 9 }] });
+  respostas.push({ corpo: true }); // premium_no_roteiro
   respostas.push({ cabecalhos: { 'content-range': '*/0' } });
   respostas.push(doGemini('Pegue o 15E na Praça da Figueira.'));
   respostas.push({ status: 201 }); // evento
@@ -125,17 +126,19 @@ test('o membro do roteiro conversa', async () => {
 
 test('no limite diário: 429 com a frase pronta, e o Gemini não é chamado', async () => {
   respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ corpo: true }); // premium_no_roteiro
   respostas.push({ cabecalhos: { 'content-range': '0-0/30' } });
   const r = resposta();
   await conversarComConcierge(pedido(pergunta), r);
   assert.equal(r.codigo, 429);
   assert.match(r.corpo.mensagem, /30 perguntas em 24 horas/);
   assert.ok(!chamadas.some((c) => c.url.includes('generativelanguage')));
-  assert.match(chamadas[1].url, /eventos\?tipo=eq\.concierge&status=eq\.ok/);
+  assert.match(chamadas[2].url, /eventos\?tipo=eq\.concierge&status=eq\.ok/);
 });
 
 test('o caminho feliz: thinking e teto declarados, resposta conferida, custo gravado', async () => {
   respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ corpo: true }); // premium_no_roteiro
   respostas.push({ cabecalhos: { 'content-range': '0-0/3' } });
   respostas.push(doGemini('Fica em 38.6916, -9.2160. Vá de trem desde o Cais do Sodré.'));
   respostas.push({ status: 201 });
@@ -167,6 +170,7 @@ test('o caminho feliz: thinking e teto declarados, resposta conferida, custo gra
 
 test('Gemini truncado: 500, e o erro é registrado', async () => {
   respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ corpo: true }); // premium_no_roteiro
   respostas.push({ cabecalhos: { 'content-range': '*/0' } });
   respostas.push({
     corpo: { candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'meio' }] } }] },
@@ -182,10 +186,49 @@ test('Gemini truncado: 500, e o erro é registrado', async () => {
 
 test('contagem do limite fora do ar não tira o concierge de ninguém', async () => {
   respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ corpo: true }); // premium_no_roteiro
   respostas.push({ status: 503 });
   respostas.push(doGemini('Resposta.'));
   respostas.push({ status: 201 });
   const r = resposta();
   await conversarComConcierge(pedido(pergunta), r);
   assert.equal(r.codigo, 200);
+});
+
+// =====================================================================
+// PREMIUM (06/10)
+// =====================================================================
+
+test('roteiro que não é Premium: 402 com a frase pronta, e o Gemini não é chamado', async () => {
+  respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ corpo: false }); // premium_no_roteiro
+  const r = resposta();
+  await conversarComConcierge(pedido(pergunta), r);
+  assert.equal(r.codigo, 402);
+  assert.match(r.corpo.mensagem, /O concierge é Premium/);
+  assert.ok(!chamadas.some((c) => c.url.includes('generativelanguage')));
+  const rpc = chamadas[1];
+  assert.match(rpc.url, /rest\/v1\/rpc\/premium_no_roteiro$/);
+  assert.equal(rpc.metodo, 'POST');
+  assert.deepEqual(JSON.parse(rpc.corpo), { p_trip_id: 42 });
+});
+
+test('a pergunta do Premium fora do ar não tira o concierge de ninguém', async () => {
+  respostas.push({ corpo: [ROTEIRO] });
+  respostas.push({ status: 503 }); // premium_no_roteiro
+  respostas.push({ cabecalhos: { 'content-range': '*/0' } });
+  respostas.push(doGemini('Resposta.'));
+  respostas.push({ status: 201 });
+  const r = resposta();
+  await conversarComConcierge(pedido(pergunta), r);
+  assert.equal(r.codigo, 200);
+});
+
+test('o Premium só é perguntado depois de conferir o acesso ao roteiro', async () => {
+  respostas.push({ corpo: [{ ...ROTEIRO, user_id: 'outra-pessoa' }] });
+  respostas.push({ corpo: [] }); // não é membro
+  const r = resposta();
+  await conversarComConcierge(pedido(pergunta), r);
+  assert.equal(r.codigo, 403);
+  assert.ok(!chamadas.some((c) => c.url.includes('premium_no_roteiro')));
 });

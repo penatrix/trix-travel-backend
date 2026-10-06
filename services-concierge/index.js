@@ -6,6 +6,7 @@ const {
   montarConversa,
   conferirResposta,
   mensagemDoLimite,
+  mensagemDoPremium,
   LIMITE_DIARIO,
 } = require('./concierge');
 // `registra-evento` chega aqui por um passo de cópia no cloudbuild (id
@@ -118,6 +119,42 @@ async function roteiroDaConta(tripId, userId) {
 }
 
 /**
+ * Se o roteiro é Premium (06/10). A pergunta é a do banco, a mesma que o
+ * app faz: `premium_no_roteiro` -- quem criou tem Premium na conta, ou o
+ * roteiro foi liberado com um crédito. Com a chave de serviço ela não
+ * confere participação, e por isso só é chamada depois de
+ * `roteiroDaConta`.
+ *
+ * Se a pergunta falhar, deixa passar, pela mesma razão da contagem do
+ * limite: banco fora do ar não tira o concierge de quem está viajando.
+ */
+async function roteiroPremium(tripId) {
+  const url = process.env.SUPABASE_URL;
+  const chave = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const controlador = new AbortController();
+  const alarme = setTimeout(() => controlador.abort(), TETO_BANCO_MS);
+  try {
+    const resposta = await fetch(`${url}/rest/v1/rpc/premium_no_roteiro`, {
+      method: 'POST',
+      headers: {
+        apikey: chave,
+        Authorization: `Bearer ${chave}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ p_trip_id: tripId }),
+      signal: controlador.signal,
+    });
+    if (!resposta.ok) throw new Error(`Banco respondeu ${resposta.status} em premium_no_roteiro.`);
+    return (await resposta.json()) === true;
+  } catch (erro) {
+    console.warn(`[Concierge] Não consegui perguntar se o roteiro ${tripId} é Premium: ${erro.message}`);
+    return true;
+  } finally {
+    clearTimeout(alarme);
+  }
+}
+
+/**
  * Quantas mensagens esta conta mandou nas últimas 24 horas.
  *
  * Janela móvel, e não "desde a meia-noite": meia-noite de onde? A pessoa
@@ -147,6 +184,7 @@ async function mensagensNasUltimas24h(userId) {
 // Entrada: { trip_id, mensagem, historico: [{ papel, texto }], lang }
 // Saída 200: { resposta }
 // Erros: 401 sem conta, 400 pedido vazio, 403 roteiro de outra pessoa,
+//        402 roteiro que não é Premium ({ error, mensagem }, 06/10),
 //        429 limite diário ({ error, mensagem } pronto para a tela),
 //        500 falha do modelo.
 // =================================================================
@@ -182,6 +220,15 @@ exports.conversarComConcierge = async (req, res) => {
     const roteiro = compactarRoteiro(row);
     if (!roteiro) {
       return res.status(409).json({ error: 'O roteiro ainda não tem conteúdo.' });
+    }
+
+    // O concierge é Premium (decisão do Paulo, 06/10). 402 e a frase
+    // pronta, como o limite; nada de Gemini.
+    if (!(await roteiroPremium(tripId))) {
+      return res.status(402).json({
+        error: 'Roteiro sem Premium.',
+        mensagem: mensagemDoPremium(lang),
+      });
     }
 
     const enviadas = await mensagensNasUltimas24h(usuario.sub);
