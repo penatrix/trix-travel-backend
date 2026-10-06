@@ -106,6 +106,7 @@ function montarPromptDaTroca({ cidade, periodo, custoAtual, evitar, pedido, idio
         "description": "Engaging, extremely concise description (max 2 short sentences).",
         "logistics": "Actionable, brief tips (how to get there/booking info).",
         "cost_estimate": "BRL [Single Number] + per person or total marker, in ${targetLanguage}",
+        "booking_required": "JSON boolean: true ONLY if the place must be booked or ticketed before arriving (table reservation, timed entry, tour, show); false for walk-in",
         "maps_search_query": "Google Maps search string including city and country"
       }
     ]
