@@ -218,7 +218,7 @@ function montarPromptDaGeracao(linha, travelDna) {
   - Vary them deliberately: different KINDS of place (a museum, a hidden-gem restaurant, a park, something indoors) and different times of day. A backup replaces an activity in ANY period, so a bank made only of dinner restaurants is useless for a morning slot.
   - "Backup" is an internal concept of the app: the traveler never sees the word or the role. When a planned place turns out to be closed, a backup is silently promoted into that exact day and period, and from then on it is just an activity like any other.
   - So write "description" and "logistics" describing ONLY the place itself. Never call it a backup, substitute, alternative or replacement, and never tie the text to a day, a period or a situation ("ideal for a rainy afternoon", "great to swap for a formal evening") - the same place may land in a morning slot.
-  - They follow the exact same schema as a regular activity (place, description, logistics, cost_estimate, maps_search_query) BUT omit the "period" key, as they are flexible.
+  - They follow the exact same schema as a regular activity (place, description, logistics, cost_estimate, booking_required, maps_search_query) BUT omit the "period" key, as they are flexible.
 `;
 
   // 4e. Custo total.
@@ -287,6 +287,7 @@ ${densityBlock}
   - Provide specific cost estimates for EVERY single activity, meal, and accommodation in BRL.
   - EVERY "cost_estimate" MUST state explicitly whether the amount is per person or the total for the whole group of ${travelers ?? 1}. Never leave this ambiguous. Write the whole value in ${targetLanguage}, following this exact pattern: ${costExample}.
   - "estimated_cost_per_night" is always the TOTAL nightly rate for the room, never per person, and must carry that marker in ${targetLanguage} too.
+  - For EVERY activity and backup, set "booking_required" (a JSON boolean). It is true ONLY when the place must be booked or ticketed BEFORE arriving: a restaurant that takes table reservations and fills up, a timed-entry museum or monument, a guided tour, a show. It is false when people just walk in, even if there is an entry fee paid at the door. The traveler uses it to track what is already booked, so do not mark everything as true.
 ${custoBlock}
 ${trasladoBlock}
   - For each city, provide a "city_cultural_summary": A 3-4 sentence engaging overview of the city's unique vibe, historical significance, or fun cultural facts to act as a mini tour guide introduction.
@@ -389,6 +390,7 @@ ${backupBlock}
                 "logistics": "Actionable tips: Best time to go, how to get there, ticket purchase links or advice.",
                 "period": "Morning/Afternoon/Evening",
                 "cost_estimate": "BRL 150",
+                "booking_required": true,
                 "maps_search_query": "The perfect Google Maps search string for this place, including city and country"
               }
             ]
@@ -400,6 +402,7 @@ ${backupBlock}
             "description": "Deep, immersive description of what to do, see, or eat there.",
             "logistics": "Actionable tips.",
             "cost_estimate": "BRL 100",
+            "booking_required": false,
             "maps_search_query": "The perfect Google Maps search string"
           }
         ]
