@@ -90,6 +90,10 @@ const TIPOS = new Set([
   // precisa aceitar este valor, senão a linha volta 400 e o módulo só
   // avisa no log -- ver o services-suggest-cities/cloudbuild.yaml.
   'sugestao_cidades',
+  // A conversa do concierge (06/10), uma linha por mensagem. Mesmo
+  // aviso: o `check` do banco precisa aceitar o valor (scripts/p4.0 no
+  // repositório do app).
+  'concierge',
 ]);
 
 const STATUS = new Set(['ok', 'erro', 'timeout']);
