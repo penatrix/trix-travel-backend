@@ -249,3 +249,116 @@ test('roteiro sem problema de horário não recebe marca nenhuma', async () => {
     restaura();
   }
 });
+
+// =====================================================================
+// SEM DATA ESCOLHIDA (06/10)
+//
+// O `start_date` nunca é nulo: sem data, é uma provisória. Conferir o
+// dia da semana contra ela reordenava e trocava atividade por causa de
+// um dia que ninguém escolheu. Sem `dataInicio`, a pergunta é "abre
+// neste período em algum dia".
+// =====================================================================
+
+/// Fecha às segundas (day 1); nos outros dias, das 10h às 18h.
+function fechaAsSegundas() {
+  return [0, 2, 3, 4, 5, 6].map((d) => ({
+    open: { day: d, time: '1000' },
+    close: { day: d, time: '1800' },
+  }));
+}
+
+test('sem data, museu que fecha às segundas não é mexido', async () => {
+  const restaura = comGoogle({
+    Museu: { periods: fechaAsSegundas() },
+    Backup: { periods: todosOsDias('0900', '2300') },
+  });
+
+  try {
+    const roteiro = roteiroDeUmDia({
+      atividades: [atv('Museu', 'Tarde')],
+      backups: [atv('Backup', undefined)],
+    });
+
+    // Sem dataInicio: o roteiro não tem data escolhida.
+    const resumo = await validarEConsertarRoteiro(roteiro, CHAVE, {});
+
+    assert.strictEqual(resumo.fora_do_horario, 0);
+    assert.strictEqual(resumo.trocados_por_horario, 0);
+    assert.strictEqual(dia1(roteiro)[0].place, 'Museu');
+    assert.ok(!dia1(roteiro)[0].hours_mismatch);
+  } finally {
+    restaura();
+  }
+});
+
+test('com a mesma data provisória numa segunda, o museu seria trocado', async () => {
+  // A prova de que a data muda o resultado -- e por isso só a data
+  // escolhida pode entrar.
+  const restaura = comGoogle({
+    Museu: { periods: fechaAsSegundas() },
+    Backup: { periods: todosOsDias('0900', '2300') },
+  });
+
+  try {
+    const roteiro = roteiroDeUmDia({
+      atividades: [atv('Museu', 'Tarde')],
+      backups: [atv('Backup', undefined)],
+    });
+    const resumo = await validarEConsertarRoteiro(roteiro, CHAVE, {
+      dataInicio: DATA_INICIO,
+    });
+    assert.strictEqual(resumo.trocados_por_horario, 1);
+  } finally {
+    restaura();
+  }
+});
+
+test('sem data, restaurante de almoço num jantar continua sendo pego', async () => {
+  const restaura = comGoogle({
+    Parque: {},
+    Cantina: { periods: todosOsDias('1130', '1500') },
+  });
+
+  try {
+    const roteiro = roteiroDeUmDia({
+      atividades: [atv('Parque', 'Tarde'), atv('Cantina', 'Noite')],
+    });
+    const resumo = await validarEConsertarRoteiro(roteiro, CHAVE, {});
+    assert.strictEqual(resumo.reordenados, 1);
+    assert.deepStrictEqual(
+      dia1(roteiro).map((a) => [a.place, a.period]),
+      [['Cantina', 'Tarde'], ['Parque', 'Noite']],
+    );
+  } finally {
+    restaura();
+  }
+});
+
+test('o horário da semana fica guardado na atividade e no backup', async () => {
+  const restaura = comGoogle({
+    Parque: {},
+    Bistro: { periods: todosOsDias('1800', '2300') },
+    Backup: { periods: todosOsDias('0900', '2300') },
+  });
+
+  try {
+    const roteiro = roteiroDeUmDia({
+      atividades: [atv('Parque', 'Tarde'), atv('Bistro', 'Noite')],
+      backups: [atv('Backup', undefined)],
+    });
+    await validarEConsertarRoteiro(roteiro, CHAVE, {});
+
+    const [parque, bistro] = dia1(roteiro);
+    assert.strictEqual(bistro.opening_hours_periods.length, 7);
+    assert.deepStrictEqual(bistro.opening_hours_periods[0], {
+      open: { day: 0, time: '1800' },
+      close: { day: 0, time: '2300' },
+    });
+    // Sem horário cadastrado, nada é gravado: a ausência da chave é o
+    // que diz "ainda não consultado".
+    assert.ok(!('opening_hours_periods' in parque));
+    assert.ok(roteiro.destinations[0].backup_activities[0].opening_hours_periods);
+  } finally {
+    restaura();
+  }
+});

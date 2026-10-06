@@ -94,6 +94,11 @@ const TIPOS = new Set([
   // aviso: o `check` do banco precisa aceitar o valor (scripts/p4.0 no
   // repositório do app).
   'concierge',
+  // A checagem de datas (06/10): o Flash dos feriados e o Google dos
+  // horários, uma linha por checagem. As trocas pelo Pro que ela faz
+  // gravam `troca_atividade`, como qualquer troca. Mesmo aviso: o
+  // `check` do banco precisa aceitar o valor (scripts/p4.1 no app).
+  'checagem_de_datas',
 ]);
 
 const STATUS = new Set(['ok', 'erro', 'timeout']);

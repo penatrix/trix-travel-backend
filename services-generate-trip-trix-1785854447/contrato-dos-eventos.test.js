@@ -45,6 +45,7 @@ const SERVICOS = [
   ['services-classify-conflicts', 'emenda_restricao'],
   ['services-update-memory-1785852020', 'memoria_viajante'],
   ['services-search-places-trix-1785854528', 'busca_lugares'],
+  ['services-checar-datas', 'checagem_de_datas'],
 ];
 
 function fonteDo(servico) {
@@ -127,6 +128,7 @@ describe('quem chama o Google conta a chamada', () => {
     'services-generate-micro-activity-1785854365',
     'services-classify-conflicts',
     'services-search-places-trix-1785854528',
+    'services-checar-datas',
   ]) {
     test(servico, () => {
       // Com dois-pontos ou como atalho de objeto -- o generate-trip
