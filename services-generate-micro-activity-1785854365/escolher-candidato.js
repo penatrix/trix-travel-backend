@@ -32,7 +32,9 @@
 const {
   consultarLugar,
   consultarHorarios,
+  abreNaJanela,
   abreNoPeriodoEmAlgumDia,
+  compactarHorarios,
   normalizarPeriodo,
   JANELAS,
 } = require('./validar-lugares');
@@ -60,7 +62,13 @@ const {
 /// mesmos ~8s - folgado dentro do orçamento de 50s do pedido. Enfiar o
 /// prazo aqui exigiria mexer na assinatura daquelas duas, que o
 /// generate-trip também usa, sem ganho nenhum.
-async function avaliarCandidato(candidato, janela, apiKey, contador = null) {
+///
+/// `diaDaSemana` (0 = domingo) é opcional. A troca da tela não manda --
+/// ela só tem o período, e a pergunta é "abre neste turno em algum
+/// dia". A checagem de datas manda, porque ali o dia é conhecido e o
+/// substituto precisa abrir NAQUELE dia: trocar um museu fechado na
+/// segunda por outro fechado na segunda não conserta nada.
+async function avaliarCandidato(candidato, janela, apiKey, contador = null, diaDaSemana = null) {
   const busca = candidato?.maps_search_query;
 
   if (!apiKey || !busca || !String(busca).trim()) {
@@ -84,14 +92,26 @@ async function avaliarCandidato(candidato, janela, apiKey, contador = null) {
   // Só chega aqui quem passou no status. Sem janela (período que o app
   // não mandou, ou período que não reconhecemos) o horário fica sem
   // veredito, e o candidato continua elegível.
-  const horario = janela
-    ? abreNoPeriodoEmAlgumDia(
-        await consultarHorarios(lugar.placeId, apiKey, contador),
-        janela,
-      )
+  const periodos = janela
+    ? await consultarHorarios(lugar.placeId, apiKey, contador)
     : null;
+  const horario = !janela
+    ? null
+    : Number.isInteger(diaDaSemana)
+      ? abreNaJanela(periodos, diaDaSemana, janela)
+      : abreNoPeriodoEmAlgumDia(periodos, janela);
 
-  return { candidato, status: 'aberto', horario, nomeGoogle: lugar.nomeGoogle };
+  return {
+    candidato,
+    status: 'aberto',
+    horario,
+    nomeGoogle: lugar.nomeGoogle,
+    // Vão para a atividade escolhida: o `place_id` deixa o link do Maps
+    // exato, e o horário guardado poupa a checagem de datas de voltar
+    // ao Google.
+    placeId: lugar.placeId,
+    horarios: compactarHorarios(periodos),
+  };
 }
 
 // =====================================================================
@@ -117,7 +137,13 @@ function penalidade(v) {
  * entregar nada, e o `motivo` diz em que condição ele foi escolhido para
  * o log contar a verdade.
  */
-async function escolherCandidato(candidatos, periodoBruto, apiKey, contador = null) {
+async function escolherCandidato(
+  candidatos,
+  periodoBruto,
+  apiKey,
+  contador = null,
+  { diaDaSemana = null } = {},
+) {
   const lista = (Array.isArray(candidatos) ? candidatos : [candidatos]).filter(Boolean);
 
   if (lista.length === 0) {
@@ -130,7 +156,7 @@ async function escolherCandidato(candidatos, periodoBruto, apiKey, contador = nu
   // Tudo em paralelo: é isto que faz a verificação custar ~1 ida em vez
   // de uma por candidato.
   const vereditos = await Promise.all(
-    lista.map((c) => avaliarCandidato(c, janela, apiKey, contador)),
+    lista.map((c) => avaliarCandidato(c, janela, apiKey, contador, diaDaSemana)),
   );
 
   let melhor = 0;
@@ -149,12 +175,23 @@ async function escolherCandidato(candidatos, periodoBruto, apiKey, contador = nu
           : 'todos os candidatos vieram fechados; entregue o primeiro';
 
   return {
-    escolhido: v.candidato,
+    escolhido: comODoGoogle(v),
     indiceEscolhido: melhor,
     vereditos,
     motivo,
     degradado: penalidade(v) > 1,
   };
+}
+
+/// O candidato escolhido, com o que o Google confirmou sobre ele.
+///
+/// Cópia, para não mexer no objeto que o modelo devolveu. Sem dado, a
+/// chave não entra: ausência é o que diz "não consultado".
+function comODoGoogle(v) {
+  const atividade = { ...v.candidato };
+  if (v.placeId) atividade.place_id = v.placeId;
+  if (v.horarios) atividade.opening_hours_periods = v.horarios;
+  return atividade;
 }
 
 module.exports = {

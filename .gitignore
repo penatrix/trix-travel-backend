@@ -33,6 +33,14 @@
 */registra-evento.js
 !services-generate-trip-trix-*/registra-evento.js
 
+# E para os dois módulos da troca de atividade, que a checagem de datas
+# (06/10) recebe do micro-activity: a troca pelo Pro ali é a mesma da
+# tela, com o mesmo prompt e a mesma escolha entre candidatos.
+*/prompt-da-troca.js
+!services-generate-micro-activity-*/prompt-da-troca.js
+*/escolher-candidato.js
+!services-generate-micro-activity-*/escolher-candidato.js
+
 # Impede que node_modules NOVO entre no repositório.
 #
 # Não desfaz o que já está rastreado: o update-memory tem 709 arquivos de

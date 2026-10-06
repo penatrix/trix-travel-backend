@@ -295,3 +295,72 @@ test('a ordem da penalidade: verificado < não verificado < fora do período < f
   assert.ok(naoVerificado < foraDoPeriodo);
   assert.ok(foraDoPeriodo < fechado);
 });
+
+// =====================================================================
+// O DIA DA SEMANA (06/10)
+//
+// A checagem de datas sabe o dia, e o substituto precisa abrir NAQUELE
+// dia. A troca da tela não manda o dia, e continua com "em algum dia".
+// =====================================================================
+
+/// Fecha às segundas (day 1); nos outros dias, das 10h às 18h.
+function fechaAsSegundas() {
+  return [0, 2, 3, 4, 5, 6].map((d) => ({
+    open: { day: d, time: '1000' },
+    close: { day: d, time: '1800' },
+  }));
+}
+
+test('com o dia da semana, quem fecha naquele dia perde', async () => {
+  const restaura = comGoogle({
+    Alfa: { status: 'OPERATIONAL', periods: fechaAsSegundas() },
+    Beta: { status: 'OPERATIONAL', periods: todosOsDias('0900', '1800') },
+  });
+  try {
+    const r = await escolherCandidato(
+      [cand('Alfa'), cand('Beta')], 'tarde', CHAVE, null, { diaDaSemana: 1 },
+    );
+    assert.strictEqual(r.escolhido.place, 'Beta');
+    assert.strictEqual(r.vereditos[0].horario, false);
+  } finally {
+    restaura();
+  }
+});
+
+test('sem o dia da semana, o mesmo museu serve', async () => {
+  const restaura = comGoogle({
+    Alfa: { status: 'OPERATIONAL', periods: fechaAsSegundas() },
+    Beta: { status: 'OPERATIONAL', periods: todosOsDias('0900', '1800') },
+  });
+  try {
+    const r = await escolherCandidato([cand('Alfa'), cand('Beta')], 'tarde', CHAVE);
+    assert.strictEqual(r.escolhido.place, 'Alfa');
+  } finally {
+    restaura();
+  }
+});
+
+test('o escolhido leva o place_id e o horário, sem mexer no que o modelo devolveu', async () => {
+  const restaura = comGoogle({
+    Alfa: { status: 'OPERATIONAL', periods: todosOsDias('1900', '2300') },
+  });
+  try {
+    const original = cand('Alfa');
+    const r = await escolherCandidato([original], 'noite', CHAVE);
+    assert.strictEqual(r.escolhido.place_id, 'id:Alfa');
+    assert.strictEqual(r.escolhido.opening_hours_periods.length, 7);
+    assert.ok(!('place_id' in original), 'o objeto do modelo fica intacto');
+  } finally {
+    restaura();
+  }
+});
+
+test('sem horário cadastrado, a chave do horário não entra', async () => {
+  const restaura = comGoogle({ Alfa: { status: 'OPERATIONAL' } });
+  try {
+    const r = await escolherCandidato([cand('Alfa')], 'noite', CHAVE);
+    assert.ok(!('opening_hours_periods' in r.escolhido));
+  } finally {
+    restaura();
+  }
+});

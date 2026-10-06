@@ -418,6 +418,39 @@ async function emLotes(itens, tamanho, tarefa) {
   return saida;
 }
 
+/// Onde o horário semanal do Google fica guardado, dentro da atividade.
+///
+/// A chave segue o schema do roteiro, que é em inglês. O formato é o do
+/// Places (`[{ open: { day, time }, close: { day, time } }]`), enxugado
+/// para só o que a janela lê.
+const CAMPO_HORARIOS = 'opening_hours_periods';
+
+function compactarHorarios(periods) {
+  if (!Array.isArray(periods) || periods.length === 0) return null;
+  const ponta = (x) =>
+    x && Number.isInteger(x.day) && typeof x.time === 'string'
+      ? { day: x.day, time: x.time }
+      : null;
+  const saida = [];
+  for (const p of periods) {
+    const open = ponta(p?.open);
+    if (!open) continue;
+    const close = ponta(p?.close);
+    saida.push(close ? { open, close } : { open });
+  }
+  return saida.length ? saida : null;
+}
+
+/// Guarda o horário no objeto, se houver. Sem dado não grava nada: a
+/// ausência da chave é o que diz "ainda não consultado", e lugar sem
+/// horário cadastrado (praça, mirante) volta a ser consultado da
+/// próxima vez -- falha de rede também devolve null, e gravar vazio ali
+/// esconderia o horário para sempre.
+function guardarHorarios(obj, periods) {
+  const compacto = compactarHorarios(periods);
+  if (obj && compacto) obj[CAMPO_HORARIOS] = compacto;
+}
+
 /// Junta todo lugar do roteiro que tem maps_search_query, mantendo a
 /// referência ao objeto original para poder alterá-lo depois.
 function coletarLugares(roteiro) {
@@ -528,7 +561,16 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
   // fechamento escolheu o Soya Cantine Bio às cegas, e a checagem de
   // horário logo depois descobriu que ele não abre de manhã e teve que
   // trocar de novo. Dois backups queimados, um problema resolvido.
-  const dataInicio = opcoes.dataInicio;
+  //
+  // **Sem data escolhida, a conferência é "abre neste período em algum
+  // dia"** (06/10). Antes o handler mandava o `start_date` mesmo com
+  // `is_date_set = false`, e a provisória decidia o dia da semana: a
+  // geração reordenava, gastava backup e marcava aviso por causa de uma
+  // segunda-feira que ninguém escolheu. Em produção, 3 dos 8 avisos de
+  // horário estavam em roteiros sem data. A conferência pelo dia da
+  // semana de verdade é da checagem de datas (`services-checar-datas`),
+  // que roda quando a pessoa escolhe a data.
+  const dataInicio = opcoes.dataInicio ?? null;
   const diaGlobal = new Map();
   const horarioDe = new Map();
 
@@ -544,21 +586,26 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
       }
       offset += dias.length;
     }
+  }
 
-    // Hospedagem fica de fora: não tem período, e hotel não se troca aqui.
-    const paraHorario = lugares.filter(
-      (l) =>
-        l.tipo !== 'hospedagem' &&
-        l.obj.place_id &&
-        l.veredito.veredito !== 'fechado',
+  // Hospedagem fica de fora: não tem período, e hotel não se troca aqui.
+  const paraHorario = lugares.filter(
+    (l) =>
+      l.tipo !== 'hospedagem' &&
+      l.obj.place_id &&
+      l.veredito.veredito !== 'fechado',
+  );
+  if (paraHorario.length) {
+    const horarios = await emLotes(paraHorario, CONCORRENCIA, (l) =>
+      consultarHorarios(l.obj.place_id, apiKey, contador),
     );
-    if (paraHorario.length) {
-      const horarios = await emLotes(paraHorario, CONCORRENCIA, (l) =>
-        consultarHorarios(l.obj.place_id, apiKey, contador),
-      );
-      paraHorario.forEach((l, i) => horarioDe.set(l.obj, horarios[i]));
-      resumo.horarios_verificados = paraHorario.length;
-    }
+    paraHorario.forEach((l, i) => {
+      horarioDe.set(l.obj, horarios[i]);
+      // O horário da semana fica guardado na atividade: é o que deixa a
+      // checagem de datas conferir o roteiro sem voltar ao Google.
+      guardarHorarios(l.obj, horarios[i]);
+    });
+    resumo.horarios_verificados = paraHorario.length;
   }
 
   resumo.chamadas_places = contador.chamadas;
@@ -566,8 +613,12 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
   /// true / false / null (sem dado). null nunca conta como fechado.
   const abreNoPeriodo = (obj, dia, periodoBruto) => {
     const periodo = normalizarPeriodo(periodoBruto);
+    if (!periodo || !horarioDe.has(obj)) return null;
+    if (!dataInicio) {
+      return abreNoPeriodoEmAlgumDia(horarioDe.get(obj), JANELAS[periodo]);
+    }
     const diaSemana = diaDaSemanaDoDia(dataInicio, diaGlobal.get(dia));
-    if (!periodo || diaSemana === null || !horarioDe.has(obj)) return null;
+    if (diaSemana === null) return null;
     return abreNaJanela(horarioDe.get(obj), diaSemana, JANELAS[periodo]);
   };
 
@@ -752,4 +803,11 @@ module.exports = {
   acharTrocaDePeriodo,
   trocarDeSlot,
   distanciaEntrePeriodos,
+  // A checagem de datas (`services-checar-datas`) recebe este arquivo
+  // por cópia, como os outros, e usa o horário guardado na atividade.
+  CAMPO_HORARIOS,
+  compactarHorarios,
+  guardarHorarios,
+  emLotes,
+  valorBrl,
 };

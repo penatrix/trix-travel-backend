@@ -1,0 +1,106 @@
+# Constrói E implanta a checagem de datas.
+#
+# Mesmo formato do concierge: o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 06/10)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito: erra alto em vez de
+# criar um serviço duplicado em silêncio. Então, uma vez só, à mão:
+#
+#   1. Criar o serviço `checar-datas` no Cloud Run, em europe-west1. O
+#      app chama https://checar-datas-1016948893404.europe-west1.run.app,
+#      então o NOME precisa ser exatamente este.
+#   2. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   3. Variáveis de ambiente:
+#        SUPABASE_JWT_SECRET        para validar o token do app
+#        GEMINI_API_KEY             para o Flash dos feriados e o Pro da troca
+#        GOOGLE_MAPS_KEY            para o horário dos lugares
+#        SUPABASE_URL e
+#        SUPABASE_SERVICE_ROLE_KEY  para ler o roteiro, conferir o dono e
+#                                   gravar o custo
+#   4. O `check` da coluna `tipo` da tabela `eventos` precisa aceitar
+#      'checagem_de_datas' (scripts/p4.1 no repositório do app). Sem isso
+#      a checagem funciona, mas o custo não é gravado.
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: checarDatas
+  _SERVICE_NAME: checar-datas
+  _REGION: europe-west1
+
+steps:
+  # Quatro módulos chegam de outras pastas. O contexto do `pack` é a
+  # pasta do serviço (`--path=.`), então eles são copiados para cá ANTES
+  # do build -- sem isto o build passa e a revisão quebra no require.
+  # Mesmas origens do `pretest` do package.json.
+  - id: copia-registra-evento
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/registra-evento.js
+      - services-checar-datas/registra-evento.js
+
+  - id: copia-validacao
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-trip-trix-1785854447/validar-lugares.js
+      - services-checar-datas/validar-lugares.js
+
+  # A troca pelo Pro é a troca da tela: o mesmo prompt e a mesma escolha
+  # entre candidatos, da pasta do micro-activity.
+  - id: copia-prompt-da-troca
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-micro-activity-1785854365/prompt-da-troca.js
+      - services-checar-datas/prompt-da-troca.js
+
+  - id: copia-escolher-candidato
+    name: gcr.io/cloud-builders/gcloud
+    entrypoint: cp
+    args:
+      - services-generate-micro-activity-1785854365/escolher-candidato.js
+      - services-checar-datas/escolher-candidato.js
+
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-checar-datas
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-checar-datas:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-checar-datas:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-checar-datas:$COMMIT_SHA
+      - --region=${_REGION}
+      # O pior caso do handler é ~95 s (Google e Flash em paralelo, depois
+      # as trocas pelo Pro). Este teto precisa ser MAIOR, senão quem corta
+      # é a plataforma, sem log e sem resposta. O app espera 110 s.
+      - --timeout=120
+
+images:
+  - gcr.io/$PROJECT_ID/trix-checar-datas:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY

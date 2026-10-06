@@ -428,12 +428,17 @@ exports.generateTrip = async (req, res) => {
     // possivelmente desatualizado é ruim, roteiro nenhum é pior.
     // start_date entra porque a checagem de horário precisa saber o dia da
     // semana de cada dia do roteiro: museu fechado na segunda só aparece se
-    // soubermos que o dia 3 cai numa segunda. Sem a data, a segunda passada
-    // não roda e o resto continua igual.
+    // soubermos que o dia 3 cai numa segunda.
+    //
+    // **Só quando a data foi escolhida.** O `start_date` nunca é nulo: sem
+    // data, ele é uma provisória, e conferir horário contra ela reordenava
+    // e trocava atividade por causa de um dia da semana que ninguém
+    // escolheu. Sem data, a conferência é "abre neste período em algum
+    // dia"; a do dia da semana fica para a checagem de datas.
     const resumoLugares = await validarEConsertarRoteiro(
       tripJsonObject,
       process.env.GOOGLE_MAPS_KEY,
-      { dataInicio: tripAtual.start_date },
+      { dataInicio: tripAtual.is_date_set === true ? tripAtual.start_date : null },
     );
     console.log(
       `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
