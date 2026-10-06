@@ -197,8 +197,17 @@ function mensagemDoLimite(lang = 'pt') {
     : `Você chegou a ${LIMITE_DIARIO} perguntas em 24 horas. O concierge volta amanhã.`;
 }
 
+/// O aviso de roteiro que não é Premium (06/10). O app pergunta antes de
+/// abrir a conversa; esta frase só chega lá se a pergunta do app falhou.
+function mensagemDoPremium(lang = 'pt') {
+  return lang === 'en'
+    ? 'The concierge is Premium. Whoever created this itinerary can make it Premium.'
+    : 'O concierge é Premium. Quem criou este roteiro pode torná-lo Premium.';
+}
+
 module.exports = {
   limparEntrada,
+  mensagemDoPremium,
   compactarRoteiro,
   montarInstrucoes,
   montarConversa,

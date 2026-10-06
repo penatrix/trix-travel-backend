@@ -11,6 +11,7 @@ const {
   montarConversa,
   conferirResposta,
   mensagemDoLimite,
+  mensagemDoPremium,
   MAX_MENSAGEM,
   MAX_TROCAS,
   MAX_DESCRICAO,
@@ -170,4 +171,9 @@ test('resposta vazia vira null', () => {
 
 test('o aviso do limite diz o número', () => {
   assert.match(mensagemDoLimite('pt'), new RegExp(`${LIMITE_DIARIO} perguntas em 24 horas`));
+});
+
+test('o aviso do Premium diz quem libera, no idioma da pessoa', () => {
+  assert.match(mensagemDoPremium('pt'), /Quem criou este roteiro pode torná-lo Premium/);
+  assert.match(mensagemDoPremium('en'), /Whoever created this itinerary/);
 });
