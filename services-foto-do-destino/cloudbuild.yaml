@@ -12,10 +12,12 @@
 # existir com este nome e região -- de propósito. Então, uma vez só, à
 # mão:
 #
-#   1. Criar o serviço `foto-do-destino` no Cloud Run, em europe-west1,
-#      com a imagem hello. O app chama
-#      https://foto-do-destino-1016948893404.europe-west1.run.app,
-#      então o NOME precisa ser exatamente este.
+#   1. Criar o serviço `services-foto-do-destino` no Cloud Run, em
+#      europe-west1, com a imagem hello. O app chama
+#      https://services-foto-do-destino-1016948893404.europe-west1.run.app,
+#      então o NOME precisa ser exatamente este. (Os outros serviços não
+#      têm o prefixo `services-`; este nasceu com o nome da pasta em
+#      07/10, e nome de serviço no Cloud Run não muda depois de criado.)
 #   2. Variáveis de ambiente:
 #        SUPABASE_JWT_SECRET        para validar o token do app
 #        SUPABASE_URL e
@@ -28,7 +30,7 @@
 
 substitutions:
   _FUNCTION_TARGET: fotoDoDestino
-  _SERVICE_NAME: foto-do-destino
+  _SERVICE_NAME: services-foto-do-destino
   _REGION: europe-west1
 
 steps:
