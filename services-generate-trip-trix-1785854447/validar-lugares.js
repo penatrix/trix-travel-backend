@@ -308,7 +308,47 @@ async function consultarLugar(textoBusca, apiKey, contador = null) {
 // ---------------------------------------------------------------------
 
 const URL_TEXT_SEARCH_NOVO = 'https://places.googleapis.com/v1/places:searchText';
-const CAMPOS_DO_TEXT_SEARCH = 'places.id,places.displayName,places.businessStatus';
+// `primaryType` e `types` estão no mesmo nível de cobrança (Text Search
+// Pro) que `displayName` e `businessStatus`, que já eram pedidos: o tipo
+// do lugar entrou sem mudar o preço da chamada (07/10).
+const CAMPOS_DO_TEXT_SEARCH =
+  'places.id,places.displayName,places.businessStatus,places.primaryType,places.types';
+
+// ---------------------------------------------------------------------
+// O TIPO DO LUGAR (07/10)
+//
+// O Google diz o que o lugar é ("museum", "restaurant", "park"...). O app
+// usa isso para escolher a imagem de categoria quando o lugar não tem foto
+// própria -- o restaurante da esquina não está no Unsplash. Guardado na
+// atividade como `place_types`, do mais específico ao mais geral, sem os
+// rótulos que todo lugar tem.
+// ---------------------------------------------------------------------
+
+const TIPOS_GENERICOS = new Set([
+  'point_of_interest',
+  'establishment',
+  'premise',
+  'political',
+  'geocode',
+]);
+const MAX_TIPOS = 4;
+const CAMPO_TIPOS = 'place_types';
+
+/// Os tipos que valem guardar, ou undefined quando não sobra nenhum.
+function tiposDoLugar(...listas) {
+  const vistos = [];
+  for (const t of listas.flat()) {
+    if (typeof t !== 'string' || !t || TIPOS_GENERICOS.has(t)) continue;
+    if (!vistos.includes(t)) vistos.push(t);
+    if (vistos.length === MAX_TIPOS) break;
+  }
+  return vistos.length ? vistos : undefined;
+}
+
+/// Escreve os tipos na atividade (ou no backup, ou na hospedagem).
+function guardarTipos(obj, tipos) {
+  if (obj && Array.isArray(tipos) && tipos.length) obj[CAMPO_TIPOS] = tipos;
+}
 
 /// Lê a resposta do Text Search (New) no mesmo formato de veredito da
 /// legada. Pura, para o teste exercitar sem rede.
@@ -317,15 +357,18 @@ function lerTextSearchNovo(dados) {
   // Sem resultado a API nova devolve `{}`, e não um status ZERO_RESULTS.
   if (!primeiro) return { veredito: 'nao_encontrado' };
 
+  const tipos = tiposDoLugar(primeiro.primaryType ?? [], primeiro.types ?? []);
+  const comTipos = tipos ? { tipos } : {};
   const status = primeiro.businessStatus;
   if (!status) {
-    return { veredito: 'aberto', placeId: primeiro.id, semStatus: true };
+    return { veredito: 'aberto', placeId: primeiro.id, semStatus: true, ...comTipos };
   }
   return {
     veredito: FECHADO.has(status) ? 'fechado' : 'aberto',
     status,
     placeId: primeiro.id,
     nomeGoogle: primeiro.displayName?.text,
+    ...comTipos,
   };
 }
 
@@ -387,11 +430,15 @@ async function consultarLugarLegado(textoBusca, apiKey, contador = null) {
     if (!primeiro) return { veredito: 'nao_encontrado' };
 
     const status = primeiro.business_status;
+    // A busca legada devolve o resultado inteiro, `types` incluído: o
+    // tipo do lugar não custa nada a mais aqui.
+    const tipos = tiposDoLugar(primeiro.types ?? []);
+    const comTipos = tipos ? { tipos } : {};
 
     // business_status ausente é comum em pontos que não são estabelecimento
     // comercial (praças, mirantes, praias). Ausência não é fechamento.
     if (!status) {
-      return { veredito: 'aberto', placeId: primeiro.place_id, semStatus: true };
+      return { veredito: 'aberto', placeId: primeiro.place_id, semStatus: true, ...comTipos };
     }
 
     return {
@@ -399,6 +446,7 @@ async function consultarLugarLegado(textoBusca, apiKey, contador = null) {
       status,
       placeId: primeiro.place_id,
       nomeGoogle: primeiro.name,
+      ...comTipos,
     };
   } catch (erro) {
     return { veredito: 'erro', motivo: erro.name === 'AbortError' ? 'timeout' : erro.message };
@@ -535,6 +583,9 @@ async function validarEConsertarRoteiro(roteiro, apiKey, opcoes = {}) {
     // place_id resolvido deixa o link do Maps exato em vez de uma busca por
     // texto, e é o insumo da consulta de horário logo abaixo.
     if (vereditos[i].placeId) l.obj.place_id = vereditos[i].placeId;
+    // O tipo escolhe a imagem de categoria no app, quando o lugar não tem
+    // foto própria.
+    guardarTipos(l.obj, vereditos[i].tipos);
   });
 
   // ---- 2. Backup fechado sai antes de qualquer troca ----
@@ -787,6 +838,9 @@ module.exports = {
   // (nenhum `require`) de propósito - é o que torna a cópia possível.
   consultarHorarios,
   coletarLugares,
+  // O tipo do lugar, guardado também pela troca e pela checagem de datas.
+  tiposDoLugar,
+  guardarTipos,
   // Exportados para teste: a lógica de janela é onde mora o risco de falso
   // positivo, e ela precisa ser exercitável sem chamar o Google.
   abreNaJanela,

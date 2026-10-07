@@ -31,6 +31,7 @@ function cand(nome) {
 ///   status  - o business_status do textsearch, ou 'ZERO_RESULTS' /
 ///             'ERRO_HTTP' para os caminhos ruins
 ///   periods - o opening_hours.periods do place/details, ou undefined
+///   types   - os tipos do lugar no textsearch, ou undefined
 ///
 /// Devolve uma função para restaurar o fetch original, chamada no finally
 /// de cada teste para um teste não contaminar o outro.
@@ -51,7 +52,12 @@ function comGoogle(lugares) {
 
       return json({
         status: 'OK',
-        results: [{ place_id: `id:${nome}`, name: nome, business_status: l.status }],
+        results: [{
+          place_id: `id:${nome}`,
+          name: nome,
+          business_status: l.status,
+          ...(l.types ? { types: l.types } : {}),
+        }],
       });
     }
 
@@ -350,6 +356,22 @@ test('o escolhido leva o place_id e o horário, sem mexer no que o modelo devolv
     assert.strictEqual(r.escolhido.place_id, 'id:Alfa');
     assert.strictEqual(r.escolhido.opening_hours_periods.length, 7);
     assert.ok(!('place_id' in original), 'o objeto do modelo fica intacto');
+  } finally {
+    restaura();
+  }
+});
+
+test('o escolhido leva o tipo do lugar, para a imagem de categoria', async () => {
+  const restaura = comGoogle({
+    Alfa: {
+      status: 'OPERATIONAL',
+      periods: todosOsDias('1900', '2300'),
+      types: ['bar', 'point_of_interest', 'establishment'],
+    },
+  });
+  try {
+    const r = await escolherCandidato([cand('Alfa')], 'noite', CHAVE);
+    assert.deepStrictEqual(r.escolhido.place_types, ['bar']);
   } finally {
     restaura();
   }

@@ -36,6 +36,7 @@ const {
   abreNoPeriodoEmAlgumDia,
   compactarHorarios,
   normalizarPeriodo,
+  guardarTipos,
   JANELAS,
 } = require('./validar-lugares');
 
@@ -111,6 +112,8 @@ async function avaliarCandidato(candidato, janela, apiKey, contador = null, diaD
     // ao Google.
     placeId: lugar.placeId,
     horarios: compactarHorarios(periodos),
+    // O tipo do lugar escolhe a imagem de categoria no app.
+    tipos: lugar.tipos,
   };
 }
 
@@ -191,6 +194,7 @@ function comODoGoogle(v) {
   const atividade = { ...v.candidato };
   if (v.placeId) atividade.place_id = v.placeId;
   if (v.horarios) atividade.opening_hours_periods = v.horarios;
+  guardarTipos(atividade, v.tipos);
   return atividade;
 }
 
