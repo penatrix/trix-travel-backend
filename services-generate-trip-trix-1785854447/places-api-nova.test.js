@@ -1,9 +1,11 @@
 // A busca do lugar pela Places API (New), atrás de PLACES_API_NOVA=1.
 //
 // O que isto trava:
-//   * a máscara pede SÓ os três campos que o código usa -- cada campo a
-//     mais é cobrado, e foi exatamente o "pede tudo" da legada que fez
-//     61% do custo do Places ser dado que ninguém lê (21/09);
+//   * a máscara pede SÓ os campos que o código usa, e todos do mesmo
+//     nível de cobrança (Text Search Pro) -- campo de nível acima muda o
+//     preço, e foi exatamente o "pede tudo" da legada que fez 61% do
+//     custo do Places ser dado que ninguém lê (21/09). O tipo do lugar
+//     (`primaryType`, `types`) entrou em 07/10 e é Pro, como o nome;
 //   * a resposta nova vira o MESMO veredito da legada, para o resto da
 //     passada de conserto não saber qual API respondeu;
 //   * sem a variável, nada muda: a legada continua sendo a padrão.
@@ -14,6 +16,8 @@ const assert = require('node:assert');
 const {
   consultarLugar,
   lerTextSearchNovo,
+  tiposDoLugar,
+  guardarTipos,
 } = require('./validar-lugares');
 
 function comFetch(responder) {
@@ -50,6 +54,51 @@ test('lerTextSearchNovo: aberto, fechado, sem status e sem resultado', () => {
   assert.deepStrictEqual(lerTextSearchNovo({}), { veredito: 'nao_encontrado' });
 });
 
+test('o tipo do lugar: do mais específico, sem os genéricos', () => {
+  const v = lerTextSearchNovo({ places: [{
+    id: 'ChIJ5',
+    businessStatus: 'OPERATIONAL',
+    primaryType: 'art_museum',
+    types: ['art_museum', 'museum', 'tourist_attraction', 'point_of_interest', 'establishment'],
+  }] });
+  assert.deepStrictEqual(v.tipos, ['art_museum', 'museum', 'tourist_attraction']);
+  assert.deepStrictEqual(tiposDoLugar(['point_of_interest', 'establishment']), undefined);
+  assert.deepStrictEqual(
+    tiposDoLugar(['a', 'b', 'c', 'd', 'e']),
+    ['a', 'b', 'c', 'd'],
+    'quatro bastam para escolher a categoria',
+  );
+});
+
+test('sem a variável, a legada também traz o tipo', async () => {
+  delete process.env.PLACES_API_NOVA;
+  const f = comFetch(() => ok({
+    status: 'OK',
+    results: [{
+      place_id: 'ChIJz',
+      name: 'Café',
+      business_status: 'OPERATIONAL',
+      types: ['cafe', 'food', 'point_of_interest', 'establishment'],
+    }],
+  }));
+  try {
+    const v = await consultarLugar('Café', 'chave');
+    assert.deepStrictEqual(v.tipos, ['cafe', 'food']);
+  } finally {
+    f.desfazer();
+  }
+});
+
+test('guardarTipos escreve place_types, e só quando há tipo', () => {
+  const a = {};
+  guardarTipos(a, ['museum']);
+  assert.deepStrictEqual(a.place_types, ['museum']);
+  const b = {};
+  guardarTipos(b, undefined);
+  guardarTipos(b, []);
+  assert.ok(!('place_types' in b), 'ausência diz "não consultado"');
+});
+
 test('com PLACES_API_NOVA=1: POST na API nova, com a máscara mínima', async () => {
   process.env.PLACES_API_NOVA = '1';
   const f = comFetch(() => ok({ places: [{ id: 'ChIJx', businessStatus: 'OPERATIONAL' }] }));
@@ -66,8 +115,8 @@ test('com PLACES_API_NOVA=1: POST na API nova, com a máscara mínima', async ()
     assert.strictEqual(opcoes.headers['X-Goog-Api-Key'], 'chave');
     assert.strictEqual(
       opcoes.headers['X-Goog-FieldMask'],
-      'places.id,places.displayName,places.businessStatus',
-      'campo a mais na máscara é campo a mais na conta',
+      'places.id,places.displayName,places.businessStatus,places.primaryType,places.types',
+      'campo de outro nível na máscara é outro preço na conta',
     );
     assert.deepStrictEqual(JSON.parse(opcoes.body), {
       textQuery: 'Museu do Amanhã, Rio de Janeiro, Brasil',

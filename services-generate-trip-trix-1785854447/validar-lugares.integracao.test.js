@@ -29,7 +29,7 @@ function todosOsDias(abre, fecha) {
   }));
 }
 
-/// `lugares` é { "<place>": { status?, periods? } }.
+/// `lugares` é { "<place>": { status?, periods?, types? } }.
 /// Sem `status` = OPERATIONAL. Sem `periods` = sem horário cadastrado.
 function comGoogle(lugares) {
   const original = global.fetch;
@@ -47,6 +47,7 @@ function comGoogle(lugares) {
           place_id: `id:${nome}`,
           name: nome,
           business_status: lugares[nome].status ?? 'OPERATIONAL',
+          ...(lugares[nome].types ? { types: lugares[nome].types } : {}),
         }],
       });
     }
@@ -358,6 +359,30 @@ test('o horário da semana fica guardado na atividade e no backup', async () => 
     // que diz "ainda não consultado".
     assert.ok(!('opening_hours_periods' in parque));
     assert.ok(roteiro.destinations[0].backup_activities[0].opening_hours_periods);
+  } finally {
+    restaura();
+  }
+});
+
+test('o tipo do lugar fica guardado na atividade e no backup', async () => {
+  const restaura = comGoogle({
+    Parque: { types: ['park', 'point_of_interest', 'establishment'] },
+    Bistro: { types: ['restaurant', 'food', 'point_of_interest'] },
+    Backup: {},
+  });
+
+  try {
+    const roteiro = roteiroDeUmDia({
+      atividades: [atv('Parque', 'Tarde'), atv('Bistro', 'Noite')],
+      backups: [atv('Backup', undefined)],
+    });
+    await validarEConsertarRoteiro(roteiro, CHAVE, {});
+
+    const [parque, bistro] = dia1(roteiro);
+    assert.deepStrictEqual(parque.place_types, ['park']);
+    assert.deepStrictEqual(bistro.place_types, ['restaurant', 'food']);
+    // Sem tipo na resposta, nada é gravado.
+    assert.ok(!('place_types' in roteiro.destinations[0].backup_activities[0]));
   } finally {
     restaura();
   }

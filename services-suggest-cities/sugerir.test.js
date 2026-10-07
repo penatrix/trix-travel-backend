@@ -155,6 +155,16 @@ test('o prompt proíbe coordenada e lugar inventado', () => {
   assert.ok(p.includes('"City, Country"'));
 });
 
+test('cidade no Brasil leva a sigla do estado no search', () => {
+  // A foto do destino cai da cidade para o estado quando a cidade não
+  // tem foto boa. Sem a sigla, Jericoacoara caía direto na foto do
+  // Brasil (07/10). O país continua sendo a última parte, que é o que o
+  // app compara com o do Google.
+  const p = montarPrompt({ destination: 'Ceará', days: 6, maxCities: 3 });
+  assert.ok(p.includes('"City, UF, Country"'));
+  assert.ok(p.includes('Jijoca de Jericoacoara, CE, Brasil'));
+});
+
 test('em inglês, a resposta vem em inglês', () => {
   const p = montarPrompt({ destination: 'Italy', days: 6, maxCities: 3, lang: 'en' });
   assert.ok(p.includes('are in English'));

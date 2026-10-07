@@ -30,6 +30,7 @@ const {
   consultarLugar,
   consultarHorarios,
   guardarHorarios,
+  guardarTipos,
   emLotes,
   CAMPO_HORARIOS,
 } = require('./validar-lugares');
@@ -131,6 +132,8 @@ async function completarHorarios(roteiro, apiKey, contador) {
       const lugar = await consultarLugar(String(obj.maps_search_query), apiKey, contador);
       if (!lugar.placeId) return;
       obj.place_id = lugar.placeId;
+      // De graça na mesma busca: roteiro antigo ganha o tipo do lugar.
+      guardarTipos(obj, lugar.tipos);
     }
     guardarHorarios(obj, await consultarHorarios(obj.place_id, apiKey, contador));
   });

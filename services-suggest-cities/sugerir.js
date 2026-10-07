@@ -58,7 +58,7 @@ TASK:
 
 RULES:
 - Real, existing cities only. Never invent a place. Never return coordinates.
-- "search" is "City, Country", both in ${idioma}, so that a maps search finds the right one (e.g. "${lang === 'en' ? 'Florence, Italy' : 'Florença, Itália'}").
+- "search" is "City, Country", both in ${idioma}, so that a maps search finds the right one (e.g. "${lang === 'en' ? 'Florence, Italy' : 'Florença, Itália'}"). For a city in Brazil, put the two-letter state code in the middle: "City, UF, Country" (e.g. "Jijoca de Jericoacoara, CE, ${lang === 'en' ? 'Brazil' : 'Brasil'}").
 - "name", "search" and "reason" are in ${idioma}.
 - "reason" is ONE concrete line, max 12 words: distance or travel time from an itinerary city plus why it fits the vibes. Example: "a 2h de trem de Berlim, pelo vale do Elba". No hype words, no emojis.
 - Interpret vibes literally.
