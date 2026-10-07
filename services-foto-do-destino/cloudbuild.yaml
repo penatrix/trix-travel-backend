@@ -1,0 +1,70 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras pastas -- o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts. Este serviço não usa módulo de
+# outra pasta, então não há passo de cópia.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 07/10)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito. Então, uma vez só, à
+# mão:
+#
+#   1. Criar o serviço `foto-do-destino` no Cloud Run, em europe-west1,
+#      com a imagem hello. O app chama
+#      https://foto-do-destino-1016948893404.europe-west1.run.app,
+#      então o NOME precisa ser exatamente este.
+#   2. Variáveis de ambiente:
+#        SUPABASE_JWT_SECRET        para validar o token do app
+#        SUPABASE_URL e
+#        SUPABASE_SERVICE_ROLE_KEY  para ler e gravar fotos_de_destino
+#        UNSPLASH_ACCESS_KEY        a Access Key do app no Unsplash
+#                                   (de preferência pelo Secret Manager)
+#   3. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   4. A tabela `fotos_de_destino` (scripts/p4.2 no repositório do app).
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: fotoDoDestino
+  _SERVICE_NAME: foto-do-destino
+  _REGION: europe-west1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-foto-do-destino
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-foto-do-destino:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-foto-do-destino:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-foto-do-destino:$COMMIT_SHA
+      - --region=${_REGION}
+      # O handler para sozinho em 22 s (TETO_TOTAL_MS). Este teto precisa
+      # ser MAIOR, senão quem corta é a plataforma, sem resposta.
+      - --timeout=40
+
+images:
+  - gcr.io/$PROJECT_ID/trix-foto-do-destino:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
