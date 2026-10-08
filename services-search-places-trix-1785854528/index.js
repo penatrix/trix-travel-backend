@@ -8,6 +8,11 @@ const {
   statusDoErro,
 } = require('./registra-evento');
 const { montarUrlDoAutocomplete } = require('./montar-url-do-autocomplete');
+const {
+  lerCoordenada,
+  montarUrlDoReverso,
+  cidadeDoResultado,
+} = require('./cidade-por-coordenada');
 
 // CTO Tip: Inicializar clientes externos FORA da função principal.
 // O Cloud Run mantém isso em memória em execuções contínuas,
@@ -94,6 +99,17 @@ exports.searchPlaces = async (req, res) => {
 
   const comecou = Date.now();
 
+  // "Usar minha localização atual" (08/10): a cidade de uma coordenada.
+  // Exige sessão -- a Home cria a anônima antes de buscar --, porque é
+  // localização de gente, e o reverso não tem o uso pré-cadastro do
+  // autocomplete. Ver `cidade-por-coordenada.js`.
+  if (req.query.latlng !== undefined) {
+    if (!usuario) {
+      return res.status(401).json({ error: 'Sessão obrigatória.' });
+    }
+    return cidadePorCoordenada(req, res, usuario, comecou);
+  }
+
   // 2. Pega o que o FlutterFlow enviou na URL
   const input = req.query.input;
   const lang = req.query.lang || 'pt-BR';
@@ -164,3 +180,51 @@ exports.searchPlaces = async (req, res) => {
     return res.status(500).json({ error: 'Erro interno no servidor' });
   }
 };
+
+// A coordenada nunca entra em log nem em `eventos`: o que se registra é
+// que houve uma chamada ao Google, e se ela achou cidade.
+async function cidadePorCoordenada(req, res, usuario, comecou) {
+  const coordenada = lerCoordenada(req.query.latlng);
+  if (!coordenada) {
+    return res.status(400).json({ error: 'latlng deve ser "lat,lng".' });
+  }
+  const lang = req.query.lang || 'pt-BR';
+  const url = montarUrlDoReverso(coordenada, lang, process.env.GOOGLE_MAPS_KEY);
+
+  try {
+    const resposta = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    const dados = await resposta.json();
+    const achou = cidadeDoResultado(dados);
+    const ok = dados.status === 'OK' || dados.status === 'ZERO_RESULTS';
+
+    registrarEvento({
+      tipo: 'busca_lugares',
+      status: ok ? 'ok' : 'erro',
+      motivo: ok ? null : dados.status,
+      userId: usuario.sub,
+      chamadasPlaces: 1,
+      duracaoMs: Date.now() - comecou,
+      meta: { reverso: true, achou: !!achou },
+    });
+
+    if (!ok) {
+      // REQUEST_DENIED aqui quase sempre é a Geocoding API desligada na
+      // chave. O app mostra "não consegui" e a pessoa digita.
+      console.error(`[Reverso] O Google recusou: ${dados.status}`);
+      return res.status(502).json({ error: 'O Google não respondeu a cidade.' });
+    }
+    return res.status(200).json(achou ?? { cidade: null, texto: null });
+  } catch (error) {
+    console.error('[Reverso] Falhou:', error.message);
+    registrarEvento({
+      tipo: 'busca_lugares',
+      status: statusDoErro(error),
+      motivo: error.message,
+      userId: usuario.sub,
+      chamadasPlaces: 1,
+      duracaoMs: Date.now() - comecou,
+      meta: { reverso: true },
+    });
+    return res.status(500).json({ error: 'Erro interno no servidor' });
+  }
+}
