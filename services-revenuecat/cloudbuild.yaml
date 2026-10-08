@@ -1,0 +1,74 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras pastas -- o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts.
+#
+# Sem passo de cópia: este serviço não chama o Gemini.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 08/10)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito. Uma vez só, à mão:
+#
+#   1. Criar o serviço `revenuecat` no Cloud Run, em europe-west1, com
+#      acesso público (quem chama é o RevenueCat, sem conta do Google;
+#      a porta é o cabeçalho Authorization).
+#   2. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   3. Variáveis de ambiente, as duas últimas PELO SECRET MANAGER
+#      (variável a partir de segredo), nunca coladas como texto:
+#        SUPABASE_URL
+#        SUPABASE_SERVICE_ROLE_KEY  para chamar as funções do p4.3
+#        REVENUECAT_WEBHOOK_AUTH    o valor inteiro do cabeçalho
+#                                   Authorization cadastrado no webhook
+#                                   do RevenueCat (ex.: "Bearer <texto>")
+#   4. As funções do scripts/p4.3 do app precisam existir.
+#   5. No RevenueCat, Integrations -> Webhooks: a URL do serviço e o
+#      mesmo valor de Authorization.
+#
+# Sem uma das variáveis o serviço responde 500 e o log diz qual falta;
+# o RevenueCat reenvia, então nenhuma compra se perde enquanto isso.
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: avisoDoRevenuecat
+  _SERVICE_NAME: revenuecat
+  _REGION: europe-west1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-revenuecat
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-revenuecat:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-revenuecat:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-revenuecat:$COMMIT_SHA
+      - --region=${_REGION}
+      # Uma chamada ao Supabase por aviso, com teto de 8s.
+      - --timeout=30
+
+images:
+  - gcr.io/$PROJECT_ID/trix-revenuecat:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
