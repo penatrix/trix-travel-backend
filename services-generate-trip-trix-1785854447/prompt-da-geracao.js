@@ -103,6 +103,21 @@ function listaDeTexto(v) {
   return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
 }
 
+// "Com quem você costuma viajar" (Perfil do app, 09/10). O app grava a
+// chave em inglês dentro do `travel_dna.companions`; aqui ela vira a frase
+// que o modelo lê. Pet pede o explícito: hospedagem e lugares que aceitam
+// animal, que é o que a vibe "Pet friendly" pedia antes de sair.
+const COMPANHIA = {
+  Solo: 'alone',
+  Couple: 'as a couple',
+  Kids: 'with children',
+  Friends: 'with friends',
+  Pet: 'with a pet (pet-friendly lodging and places only)',
+};
+function companhiaDoPerfil(lista) {
+  return listaDeTexto(lista).map((c) => COMPANHIA[c]).filter(Boolean);
+}
+
 function montarPromptDaGeracao(linha, travelDna) {
   const l = linha || {};
   const isPt = l.user_language === 'pt';
@@ -172,6 +187,9 @@ function montarPromptDaGeracao(linha, travelDna) {
     const dislikes = listaDeTexto(travelDna.dislikes);
     const dietary = listaDeTexto(travelDna.dietary);
     const travelStyle = listaDeTexto(travelDna.travel_style);
+    // "Com quem você costuma viajar", do Perfil (09/10). Só entra quando
+    // existe, para o texto dos roteiros sem isso não mudar uma vírgula.
+    const companhia = companhiaDoPerfil(travelDna.companions);
     const profileLines = [];
     if (likes.length) profileLines.push(`Known likes: ${likes.join(', ')}.`);
     if (dislikes.length) profileLines.push(`Known dislikes (avoid these): ${dislikes.join(', ')}.`);
@@ -179,6 +197,9 @@ function montarPromptDaGeracao(linha, travelDna) {
       profileLines.push(`Dietary restrictions (STRICT - every meal/restaurant suggestion must comply): ${dietaryToDb(dietary).join(', ')}.`);
     }
     if (travelStyle.length) profileLines.push(`Travel style: ${travelStyle.join(', ')}.`);
+    if (companhia.length) {
+      profileLines.push(`Usually travels ${companhia.join(', ')}. Plan for that company: places, pace and lodging must suit it.`);
+    }
     if (profileLines.length) {
       travelerProfileText = `  TRAVELER PROFILE (learned from past trips - interpret literally, do not over-infer beyond what is listed):
   ${profileLines.join('\n  ')}
@@ -411,4 +432,4 @@ ${backupBlock}
   }`;
 }
 
-module.exports = { montarPromptDaGeracao, ritmoDe, dietaryToDb, diasEntre };
+module.exports = { montarPromptDaGeracao, ritmoDe, dietaryToDb, diasEntre, companhiaDoPerfil };
