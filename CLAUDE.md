@@ -133,6 +133,14 @@ cache a novas chamadas de API. Evite verbosidade no prompt.
 - `generateTrip` e `generateBrainstorming` são acionados por Webhooks do
   Supabase (autenticados via segredo compartilhado no header
   `x-webhook-secret`), não pelo app diretamente.
+- **O `generateTrip` também refaz** (09/10, `refazer.js`). O webhook da
+  `trips` é de INSERT **e** UPDATE: quando a linha está `ready` e o app
+  gravou `refazer_pedido`, o handler desvia para `refazerRoteiro`, que
+  toma posse em `refazer_iniciado_em`, gera pela mesma `gerarEValidar` e
+  só grava no sucesso (com `refeito_em`). A falha não toca no roteiro:
+  zera o pedido e escreve `refazer_erro`. Não chama `consume_trip_quota`
+  -- refazer é Premium, 1 vez por roteiro, e quem pode pedir é o gatilho
+  `trips_guarda_do_refazer` (`scripts/p4.4` do app).
 - `searchPlaces`, `generateMicroActivity` e `updateTravelerMemory` são
   chamados pelo app com o JWT do Supabase no header `Authorization`.
   `searchPlaces` aceita chamadas sem token (usado no funil pré-cadastro),
