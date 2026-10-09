@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { montarPrompt, conferirResposta } = require('./sugerir');
+const { montarPromptPerto, conferirPerto } = require('./perto');
 // `registra-evento` chega aqui por um passo de cópia no cloudbuild (id
 // `copia-registra-evento`) e, no desenvolvimento local, pelo `pretest`.
 const { registrarEvento, statusDoErro } = require('./registra-evento');
@@ -80,8 +81,15 @@ exports.suggestCities = async (req, res) => {
 
   try {
     const corpo = req.body ?? {};
+    // "Perto de você" (09/10, `perto.js`): três viagens curtas a partir da
+    // origem, para a Home. Mesmo Flash, mesmo teto; outro pedido.
+    const perto = corpo.modo === 'perto';
+    const origin = String(corpo.origin ?? '').trim().slice(0, 200);
+    if (perto && !origin) {
+      return res.status(400).json({ error: 'origin é obrigatório no modo perto.' });
+    }
     const destination = String(corpo.destination ?? '').trim().slice(0, 200);
-    if (!destination) {
+    if (!perto && !destination) {
       return res.status(400).json({ error: 'destination é obrigatório.' });
     }
     const days = Math.min(MAX_DIAS, Math.max(1, Math.round(Number(corpo.days)) || 1));
@@ -100,8 +108,13 @@ exports.suggestCities = async (req, res) => {
     const lang = corpo.lang === 'en' ? 'en' : 'pt';
 
     console.log(
-      `[Cidades] "${destination}", ${days} dia(s), até ${maxCities} cidade(s), ${vibes.length} vibe(s).`,
+      perto
+        ? `[Perto] "${origin}", ${vibes.length} vibe(s).`
+        : `[Cidades] "${destination}", ${days} dia(s), até ${maxCities} cidade(s), ${vibes.length} vibe(s).`,
     );
+    const textoDoPedido = perto
+      ? montarPromptPerto({ origin, vibes, lang })
+      : montarPrompt({ destination, days, maxCities, vibes, cities, lang });
 
     const resposta = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -111,7 +124,7 @@ exports.suggestCities = async (req, res) => {
         body: JSON.stringify({
           contents: [{
             role: 'user',
-            parts: [{ text: montarPrompt({ destination, days, maxCities, vibes, cities, lang }) }],
+            parts: [{ text: textoDoPedido }],
           }],
           generationConfig: {
             // A saída cabe folgada em 1k: até 15 cidades com uma linha
@@ -153,6 +166,30 @@ exports.suggestCities = async (req, res) => {
 
     const cru = dados.candidates[0].content.parts[0].text;
     const limpo = cru.replace(/```json/g, '').replace(/```/g, '').trim();
+
+    if (perto) {
+      const conferidoPerto = conferirPerto(JSON.parse(limpo), { origin });
+      if (!conferidoPerto) {
+        throw new Error('Resposta sem nenhum destino perto utilizável.');
+      }
+      if (conferidoPerto.descartados.length) {
+        console.warn(`[Perto] Descartados: ${conferidoPerto.descartados.join(' | ')}`);
+      }
+      registrarEvento({
+        tipo: 'sugestao_cidades',
+        userId: usuario?.sub,
+        modelo: MODELO_GEMINI,
+        uso: usoDoGemini,
+        duracaoMs: Date.now() - inicio,
+        meta: { modo: 'perto', destinos: conferidoPerto.resposta.perto.length },
+      });
+      console.log(
+        `[Perto] ${conferidoPerto.resposta.perto.map((c) => `${c.name} (${c.mode} ${c.time})`).join(', ')}` +
+        ` em ${Date.now() - inicio}ms.`,
+      );
+      return res.status(200).json(conferidoPerto.resposta);
+    }
+
     const conferido = conferirResposta(JSON.parse(limpo), { maxCities });
     if (!conferido) {
       throw new Error('Resposta sem nenhuma cidade utilizável.');
