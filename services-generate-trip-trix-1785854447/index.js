@@ -7,6 +7,7 @@ const {
   registrarEvento,
   statusDoErro,
 } = require('./registra-evento');
+const { lerPedido, parametrosDoRefazer, erroParaATela } = require('./refazer');
 
 // O modelo desta chamada, num lugar só.
 //
@@ -157,6 +158,307 @@ async function fetchGemini(url, body, rotulo) {
   }
 }
 
+// =================================================================
+// A GERAÇÃO EM SI: prompt -> Gemini -> JSON -> passagem -> lugares.
+//
+// Uma só, para a primeira geração (webhook do INSERT) e para o refazer
+// (webhook do UPDATE com `refazer_pedido`, 09/10). O que o `catch` de
+// quem chama precisa saber mesmo quando isto lança -- o uso do Gemini,
+// as chamadas ao Google e a passagem -- sai pelo `ctx`, preenchido à
+// medida que acontece: uma geração que quebra no JSON já gastou a
+// entrada, e a linha de erro precisa dizer quanto.
+// =================================================================
+async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
+  // 1. Chama a API do Gemini Pro com Thinking MEDIUM
+  const geminiResponse = await fetchGemini(
+    `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+    {
+      contents: [{ role: "user", parts: [{ text: promptText }] }],
+      generationConfig: {
+        // 16384 era suficiente quando o roteiro saía com ~13 atividades e
+        // 4 backups fixos. Hoje um Action-packed de 8 dias pede 40
+        // atividades + 8 backups, cada uma com descrição, logística e
+        // custo em pt-BR. Estourar o teto não devolve um roteiro menor:
+        // devolve um JSON cortado no meio, que quebra no JSON.parse e
+        // custa o mesmo. O limite só é cobrado pelo que for gerado de
+        // fato, então folga aqui não tem custo por si só.
+        maxOutputTokens: 32768,
+        thinkingConfig: { thinkingLevel: "MEDIUM" }
+      }
+    },
+    `trip ${tripId}`,
+  );
+
+  // Fail-fast: Verifica se a API do Gemini rejeitou a requisição (ex: Timeout ou Rate Limit)
+  if (!geminiResponse.ok) {
+    const errorText = await geminiResponse.text();
+    throw new Error(`Falha na API do Gemini: Status ${geminiResponse.status} - ${errorText}`);
+  }
+
+  const geminiData = await geminiResponse.json();
+
+  // Validação de segurança estrutural
+  if (!geminiData.candidates || !geminiData.candidates[0].content) {
+    throw new Error("Resposta do Gemini em formato inesperado ou vazia.");
+  }
+
+  // MAX_TOKENS não chega como erro: chega como resposta 200 com o texto
+  // cortado no meio de uma chave. Sem esta checagem, o que aparece no
+  // error_log é "Unexpected end of JSON input", que não diz nada sobre a
+  // causa - e estouro de MAX_TOKENS já derrubou roteiro longo antes.
+  // Melhor falhar dizendo o nome do problema.
+  const finishReason = geminiData.candidates[0].finishReason;
+  if (finishReason && finishReason !== 'STOP') {
+    throw new Error(
+      `Gemini interrompeu a geração (finishReason: ${finishReason}). ` +
+      `Se for MAX_TOKENS, o roteiro passou do teto de saída e o JSON veio cortado.`,
+    );
+  }
+
+  // Guardado em variável de handler, e não só local, porque o `catch`
+  // abaixo também registra: uma geração que passa do Gemini e quebra
+  // no JSON gastou token de verdade, e essa linha precisa dizer
+  // quanto.
+  ctx.usoDoGemini = geminiData.usageMetadata ?? null;
+
+  let tokenCount = 0;
+  if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
+    tokenCount = geminiData.usageMetadata.totalTokenCount;
+    console.log(`[Analytics] Trip ${tripId} usou ${tokenCount} tokens.`);
+  }
+
+  // 2. Extração e limpeza do JSON gerado
+  const rawText = geminiData.candidates[0].content.parts[0].text;
+  const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+
+  // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
+  const tripJsonObject = JSON.parse(cleanText);
+
+  // 2.4. A ida e volta da origem pelo grupo todo. O modelo dá o valor por
+  // pessoa e o meio (`origin_transfer`); a multiplicação é daqui, porque
+  // a dele não acompanhava o número de viajantes. Antes da validação de
+  // lugares, que também ajusta o total pela diferença.
+  ctx.passagem = normalizarPassagem(tripJsonObject, Number(tripAtual?.travelers_count));
+  if (ctx.passagem) {
+    console.log(
+      `[Passagem] Trip ${tripId}: ${ctx.passagem.modo ?? 'meio inválido'}, ` +
+      `${ctx.passagem.de ?? '-'} -> ${ctx.passagem.para ?? 'sem valor por pessoa'}.`,
+    );
+  }
+
+  // 2.5. Validação de status dos lugares, ANTES de virar 'ready'.
+  //
+  // O Gemini escreve a partir do treinamento: não tem como saber que um
+  // restaurante fechou. Quem sabe é o Google, e nós já pedimos ao modelo a
+  // string exata de busca. Lugar fechado é trocado em silêncio por um do
+  // banco de backup_activities daquela cidade - que é para isso que o
+  // prompt pede backups proporcionais ao tamanho do roteiro.
+  //
+  // Nunca lança: se o Google estiver fora, o roteiro sai como veio. Roteiro
+  // possivelmente desatualizado é ruim, roteiro nenhum é pior.
+  // start_date entra porque a checagem de horário precisa saber o dia da
+  // semana de cada dia do roteiro: museu fechado na segunda só aparece se
+  // soubermos que o dia 3 cai numa segunda.
+  //
+  // **Só quando a data foi escolhida.** O `start_date` nunca é nulo: sem
+  // data, ele é uma provisória, e conferir horário contra ela reordenava
+  // e trocava atividade por causa de um dia da semana que ninguém
+  // escolheu. Sem data, a conferência é "abre neste período em algum
+  // dia"; a do dia da semana fica para a checagem de datas.
+  const resumoLugares = await validarEConsertarRoteiro(
+    tripJsonObject,
+    process.env.GOOGLE_MAPS_KEY,
+    { dataInicio: tripAtual.is_date_set === true ? tripAtual.start_date : null },
+  );
+  console.log(
+    `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
+    `${resumoLugares.fechados} fechados, ${resumoLugares.trocados} trocados, ` +
+    `${resumoLugares.removidos} removidos, ${resumoLugares.nao_encontrados} não encontrados, ` +
+    `${resumoLugares.erros} erros.`,
+  );
+  console.log(
+    `[Horários] Trip ${tripId}: ${resumoLugares.horarios_verificados} verificados, ` +
+    `${resumoLugares.fora_do_horario} fora do período, ` +
+    `${resumoLugares.reordenados} reordenados, ` +
+    `${resumoLugares.trocados_por_horario} trocados, ` +
+    `${resumoLugares.mantidos_fora_do_horario} com aviso na tela.`,
+  );
+  resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
+
+  // Em setembro o Places passou a custar quase o mesmo que o Gemini
+  // (R$ 25,67 contra R$ 26,57). Até 21/09 esse número não existia em
+  // lugar nenhum a não ser na fatura, que não diz qual roteiro gastou.
+  ctx.chamadasPlaces = resumoLugares.chamadas_places;
+
+  return { tripJsonObject, tokenCount };
+}
+
+// =================================================================
+// O REFAZER DE UM ROTEIRO PRONTO (09/10)
+//
+// O app grava `refazer_pedido` na linha (cidades, origem, nota) e o
+// webhook do UPDATE chega aqui. As regras são do Paulo:
+//
+//   - o MESMO roteiro: nada de linha nova, para viajantes, link, cópia
+//     offline e o Premium do roteiro ficarem;
+//   - a linha continua 'ready' e mostrando o roteiro antigo enquanto
+//     gera. Só o sucesso escreve, e escreve tudo de uma vez;
+//   - a falha não toca no roteiro: zera o pedido e deixa a frase em
+//     `refazer_erro`. Como `refeito_em` continua nulo, o refazer não
+//     conta e a pessoa pode tentar de novo;
+//   - sem cota e sem crédito: é Premium, 1 vez por roteiro.
+//
+// A posse é uma escrita condicional: marca `refazer_iniciado_em` só se
+// ninguém marcou. A reentrega do webhook, ou o UPDATE que esta própria
+// marca dispara, não acha mais a linha livre e sai sem gerar.
+// =================================================================
+async function refazerRoteiro(tripAtual, res) {
+  const comecou = Date.now();
+  const tripId = tripAtual.id;
+  const lang = tripAtual.user_language === 'pt' ? 'pt' : 'en';
+  const geracao = { usoDoGemini: null, passagem: null, chamadasPlaces: null };
+
+  const { data: minha, error: posseError } = await supabase
+    .from('trips')
+    .update({ refazer_iniciado_em: new Date().toISOString() })
+    .eq('id', tripId)
+    .eq('status', 'ready')
+    .not('refazer_pedido', 'is', null)
+    .is('refazer_iniciado_em', null)
+    .is('refeito_em', null)
+    .select('id');
+  if (posseError) {
+    throw new Error(`Falha ao marcar o refazer da trip ${tripId}: ${posseError.message}`);
+  }
+  if (!minha || minha.length === 0) {
+    console.log(`[Refazer] Trip ${tripId}: outra entrega já atendeu o pedido.`);
+    return res.status(200).json({ success: true, message: 'Refazer já em curso' });
+  }
+
+  try {
+    const pedido = lerPedido(tripAtual.refazer_pedido);
+    if (!pedido) throw new Error('Pedido de refazer fora do formato.');
+
+    // Conferido de novo aqui, e não só no gatilho: o pedido pode ter sido
+    // gravado antes de o roteiro deixar de ser Premium (reembolso).
+    const { data: premium, error: premiumError } = await supabase.rpc(
+      'premium_no_roteiro',
+      { p_trip_id: tripId },
+    );
+    if (premiumError) throw new Error(`Falha ao perguntar o Premium: ${premiumError.message}`);
+    if (premium !== true) throw new Error('Roteiro sem Premium.');
+
+    const novos = parametrosDoRefazer(tripAtual, pedido);
+    const linhaNova = { ...tripAtual, ...novos };
+
+    const { data: dono, error: donoError } = await supabase
+      .from('users')
+      .select('travel_dna')
+      .eq('id', tripAtual.user_id)
+      .maybeSingle();
+    if (donoError) throw new Error(`Falha ao ler o perfil do dono: ${donoError.message}`);
+    const promptText = montarPromptDaGeracao(linhaNova, dono?.travel_dna ?? null);
+
+    console.log(
+      `[Refazer] Trip ${tripId}: ${pedido.cidades.length} cidade(s), ` +
+      `origem ${pedido.origem ? 'definida' : 'vazia'}, nota ${pedido.nota ? 'sim' : 'não'}.`,
+    );
+
+    const { tripJsonObject, tokenCount } = await gerarEValidar(linhaNova, promptText, tripId, geracao);
+
+    const { data: gravadas, error: gravarError } = await supabase
+      .from('trips')
+      .update({
+        ...novos,
+        itinerary_json: tripJsonObject,
+        title: tripJsonObject.trip_title || 'Viagem Personalizada',
+        tokens_used: tokenCount,
+        budget_actual: tripJsonObject.estimated_cost_brl,
+        refeito_em: new Date().toISOString(),
+        refazer_pedido: null,
+        refazer_iniciado_em: null,
+        refazer_erro: null,
+      })
+      .eq('id', tripId)
+      .not('refazer_iniciado_em', 'is', null)
+      .select('id');
+    if (gravarError) throw gravarError;
+
+    registrarEvento({
+      tipo: 'geracao_roteiro',
+      tripId,
+      userId: tripAtual.user_id,
+      modelo: MODELO_GEMINI,
+      uso: geracao.usoDoGemini,
+      chamadasPlaces: geracao.chamadasPlaces,
+      duracaoMs: Date.now() - comecou,
+      meta: {
+        refazer: true,
+        dias: diasDoRoteiro(linhaNova.start_date, linhaNova.end_date),
+        viajantes: Number(tripAtual.travelers_count) || null,
+        ritmo: tripAtual.pace_level || null,
+        atividades: contarAtividades(tripJsonObject),
+        prompt: 'backend',
+        passagem: geracao.passagem?.modo ?? null,
+      },
+    });
+
+    if (!gravadas || gravadas.length === 0) {
+      // O app desistiu depois de 20 minutos parado, e a desistência
+      // ganha: a pessoa já viu a frase de erro.
+      console.log(`[Refazer] Trip ${tripId}: terminou depois da desistência; descartado.`);
+      return res.status(200).json({ success: true, message: 'Refazer descartado' });
+    }
+
+    // As cidades da `trip_destinations` acompanham, sem segurar nada: o
+    // dia a dia sai do `itinerary_json`, e ela só é lida pelo rascunho.
+    try {
+      await supabase.from('trip_destinations').delete().eq('trip_id', tripId);
+      await supabase.from('trip_destinations').insert(
+        pedido.cidades.map((c, i) => ({
+          trip_id: tripId,
+          city_name: c.destination.split(',')[0].trim(),
+          order_index: i + 1,
+          duration_days: c.days,
+        })),
+      );
+    } catch (cidadesError) {
+      console.error(`[Refazer] Trip ${tripId}: cidades não regravadas - ${cidadesError.message}`);
+    }
+
+    console.log(`[Refazer] Trip ${tripId}: refeito em ${Date.now() - comecou}ms.`);
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error(`[Refazer] Trip ${tripId}: falhou - ${error.message}`);
+    registrarEvento({
+      tipo: 'geracao_roteiro',
+      status: statusDoErro(error),
+      motivo: error.message,
+      tripId,
+      userId: tripAtual.user_id,
+      modelo: MODELO_GEMINI,
+      uso: geracao.usoDoGemini,
+      chamadasPlaces: geracao.chamadasPlaces,
+      duracaoMs: Date.now() - comecou,
+      meta: { refazer: true },
+    });
+    // O roteiro fica como estava. Só o pedido sai, com a frase.
+    try {
+      await supabase
+        .from('trips')
+        .update({
+          refazer_pedido: null,
+          refazer_iniciado_em: null,
+          refazer_erro: erroParaATela(lang),
+        })
+        .eq('id', tripId);
+    } catch (dbError) {
+      console.error(`[Refazer] Trip ${tripId}: não consegui zerar o pedido -`, dbError);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+}
+
 exports.generateTrip = async (req, res) => {
   // O relógio começa na PRIMEIRA linha do handler, não na chamada ao
   // Gemini. O que interessa medir é o tempo que o usuário espera olhando
@@ -233,8 +535,7 @@ exports.generateTrip = async (req, res) => {
     // returning *"), e isso é um status novo na máquina de estados que o
     // app também lê - mudança maior, decidida à parte.
     // =================================================================
-    const { data: tripAtual, error: leituraError } = await supabase
-      .from('trips')
+    const colunasDaLeitura =
       // `end_date`, `travelers_count` e `pace_level` entram só para o
       // registro de evento: é o `meta` que explica POR QUE um roteiro
       // custou o que custou. A medição de 11/09 diz que o que pesa é
@@ -243,14 +544,28 @@ exports.generateTrip = async (req, res) => {
       // Mesma ida ao banco, três colunas a mais.
       // As outras colunas são os PARÂMETROS do prompt, que desde a fase B
       // é montado aqui (`prompt-da-geracao.js`), e não mais no app.
-      .select(
-        'id, user_id, status, prompt_payload, start_date, ' +
-        'end_date, travelers_count, pace_level, is_date_set, ' +
-        'budget_limit, budget_level, vibe_tags, special_request, ' +
-        'user_language, origin_city, planned_destinations',
-      )
+      'id, user_id, status, prompt_payload, start_date, ' +
+      'end_date, travelers_count, pace_level, is_date_set, ' +
+      'budget_limit, budget_level, vibe_tags, special_request, ' +
+      'user_language, origin_city, planned_destinations';
+    // O refazer (09/10): o pedido do app e quem já começou a atendê-lo.
+    const colunasDoRefazer = ', refazer_pedido, refazer_iniciado_em, refeito_em';
+    let { data: tripAtual, error: leituraError } = await supabase
+      .from('trips')
+      .select(colunasDaLeitura + colunasDoRefazer)
       .eq('id', tripRecord.id)
       .maybeSingle();
+    // Coluna inexistente (42703): este código subiu antes do `scripts/p4.4`
+    // do app. Sem o recuo, TODA geração cairia aqui até o script entrar;
+    // com ele, só o refazer espera.
+    if (leituraError && leituraError.code === '42703') {
+      console.warn('[Refazer] Colunas do refazer ausentes: o p4.4 ainda não rodou.');
+      ({ data: tripAtual, error: leituraError } = await supabase
+        .from('trips')
+        .select(colunasDaLeitura)
+        .eq('id', tripRecord.id)
+        .maybeSingle());
+    }
 
     if (leituraError) {
       throw new Error(`Falha ao reler a trip ${tripRecord.id}: ${leituraError.message}`);
@@ -261,6 +576,19 @@ exports.generateTrip = async (req, res) => {
     if (!tripAtual) {
       console.log(`[Segurança] Ignorando trigger. A trip ${tripRecord.id} não existe mais.`);
       return res.status(200).json({ success: true, message: "Trip inexistente" });
+    }
+
+    // O REFAZER (09/10). A linha está pronta e o app gravou um pedido:
+    // é o mesmo webhook, num UPDATE. Nada de cota aqui -- refazer não
+    // gasta cota nem crédito (decisão do Paulo), e quem pode pedir o
+    // gatilho `trips_guarda_do_refazer` já decidiu.
+    if (
+      tripAtual.status === 'ready' &&
+      tripAtual.refazer_pedido != null &&
+      tripAtual.refazer_iniciado_em == null &&
+      tripAtual.refeito_em == null
+    ) {
+      return await refazerRoteiro(tripAtual, res);
     }
 
     if (tripAtual.status !== 'generating') {
@@ -339,126 +667,16 @@ exports.generateTrip = async (req, res) => {
     // e o crédito foi embora com ela.
     cotaConsumida = true;
 
-    // 1. Chama a API do Gemini Pro com Thinking MEDIUM
-    const geminiResponse = await fetchGemini(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        contents: [{ role: "user", parts: [{ text: promptText }] }],
-        generationConfig: {
-          // 16384 era suficiente quando o roteiro saía com ~13 atividades e
-          // 4 backups fixos. Hoje um Action-packed de 8 dias pede 40
-          // atividades + 8 backups, cada uma com descrição, logística e
-          // custo em pt-BR. Estourar o teto não devolve um roteiro menor:
-          // devolve um JSON cortado no meio, que quebra no JSON.parse e
-          // custa o mesmo. O limite só é cobrado pelo que for gerado de
-          // fato, então folga aqui não tem custo por si só.
-          maxOutputTokens: 32768,
-          thinkingConfig: { thinkingLevel: "MEDIUM" }
-        }
-      },
-      `trip ${tripId}`,
-    );
-
-    // Fail-fast: Verifica se a API do Gemini rejeitou a requisição (ex: Timeout ou Rate Limit)
-    if (!geminiResponse.ok) {
-      const errorText = await geminiResponse.text();
-      throw new Error(`Falha na API do Gemini: Status ${geminiResponse.status} - ${errorText}`);
+    const geracao = { usoDoGemini: null, passagem: null, chamadasPlaces: null };
+    let resultado;
+    try {
+      resultado = await gerarEValidar(tripAtual, promptText, tripId, geracao);
+    } finally {
+      usoDoGemini = geracao.usoDoGemini;
+      passagem = geracao.passagem;
+      chamadasPlaces = geracao.chamadasPlaces;
     }
-
-    const geminiData = await geminiResponse.json();
-
-    // Validação de segurança estrutural
-    if (!geminiData.candidates || !geminiData.candidates[0].content) {
-      throw new Error("Resposta do Gemini em formato inesperado ou vazia.");
-    }
-
-    // MAX_TOKENS não chega como erro: chega como resposta 200 com o texto
-    // cortado no meio de uma chave. Sem esta checagem, o que aparece no
-    // error_log é "Unexpected end of JSON input", que não diz nada sobre a
-    // causa - e estouro de MAX_TOKENS já derrubou roteiro longo antes.
-    // Melhor falhar dizendo o nome do problema.
-    const finishReason = geminiData.candidates[0].finishReason;
-    if (finishReason && finishReason !== 'STOP') {
-      throw new Error(
-        `Gemini interrompeu a geração (finishReason: ${finishReason}). ` +
-        `Se for MAX_TOKENS, o roteiro passou do teto de saída e o JSON veio cortado.`,
-      );
-    }
-
-    // Guardado em variável de handler, e não só local, porque o `catch`
-    // abaixo também registra: uma geração que passa do Gemini e quebra
-    // no JSON gastou token de verdade, e essa linha precisa dizer
-    // quanto.
-    usoDoGemini = geminiData.usageMetadata ?? null;
-
-    let tokenCount = 0;
-    if (geminiData.usageMetadata && geminiData.usageMetadata.totalTokenCount) {
-      tokenCount = geminiData.usageMetadata.totalTokenCount;
-      console.log(`[Analytics] Trip ${tripId} usou ${tokenCount} tokens.`);
-    }
-
-    // 2. Extração e limpeza do JSON gerado
-    const rawText = geminiData.candidates[0].content.parts[0].text;
-    const cleanText = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
-
-    // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
-    const tripJsonObject = JSON.parse(cleanText);
-
-    // 2.4. A ida e volta da origem pelo grupo todo. O modelo dá o valor por
-    // pessoa e o meio (`origin_transfer`); a multiplicação é daqui, porque
-    // a dele não acompanhava o número de viajantes. Antes da validação de
-    // lugares, que também ajusta o total pela diferença.
-    passagem = normalizarPassagem(tripJsonObject, Number(tripAtual?.travelers_count));
-    if (passagem) {
-      console.log(
-        `[Passagem] Trip ${tripId}: ${passagem.modo ?? 'meio inválido'}, ` +
-        `${passagem.de ?? '-'} -> ${passagem.para ?? 'sem valor por pessoa'}.`,
-      );
-    }
-
-    // 2.5. Validação de status dos lugares, ANTES de virar 'ready'.
-    //
-    // O Gemini escreve a partir do treinamento: não tem como saber que um
-    // restaurante fechou. Quem sabe é o Google, e nós já pedimos ao modelo a
-    // string exata de busca. Lugar fechado é trocado em silêncio por um do
-    // banco de backup_activities daquela cidade - que é para isso que o
-    // prompt pede backups proporcionais ao tamanho do roteiro.
-    //
-    // Nunca lança: se o Google estiver fora, o roteiro sai como veio. Roteiro
-    // possivelmente desatualizado é ruim, roteiro nenhum é pior.
-    // start_date entra porque a checagem de horário precisa saber o dia da
-    // semana de cada dia do roteiro: museu fechado na segunda só aparece se
-    // soubermos que o dia 3 cai numa segunda.
-    //
-    // **Só quando a data foi escolhida.** O `start_date` nunca é nulo: sem
-    // data, ele é uma provisória, e conferir horário contra ela reordenava
-    // e trocava atividade por causa de um dia da semana que ninguém
-    // escolheu. Sem data, a conferência é "abre neste período em algum
-    // dia"; a do dia da semana fica para a checagem de datas.
-    const resumoLugares = await validarEConsertarRoteiro(
-      tripJsonObject,
-      process.env.GOOGLE_MAPS_KEY,
-      { dataInicio: tripAtual.is_date_set === true ? tripAtual.start_date : null },
-    );
-    console.log(
-      `[Places] Trip ${tripId}: ${resumoLugares.verificados} verificados, ` +
-      `${resumoLugares.fechados} fechados, ${resumoLugares.trocados} trocados, ` +
-      `${resumoLugares.removidos} removidos, ${resumoLugares.nao_encontrados} não encontrados, ` +
-      `${resumoLugares.erros} erros.`,
-    );
-    console.log(
-      `[Horários] Trip ${tripId}: ${resumoLugares.horarios_verificados} verificados, ` +
-      `${resumoLugares.fora_do_horario} fora do período, ` +
-      `${resumoLugares.reordenados} reordenados, ` +
-      `${resumoLugares.trocados_por_horario} trocados, ` +
-      `${resumoLugares.mantidos_fora_do_horario} com aviso na tela.`,
-    );
-    resumoLugares.detalhes.forEach((d) => console.log(`[Places] Trip ${tripId}:   ${d}`));
-
-    // Em setembro o Places passou a custar quase o mesmo que o Gemini
-    // (R$ 25,67 contra R$ 26,57). Até 21/09 esse número não existia em
-    // lugar nenhum a não ser na fatura, que não diz qual roteiro gastou.
-    chamadasPlaces = resumoLugares.chamadas_places;
+    const { tripJsonObject, tokenCount } = resultado;
 
     const tripTitle = tripJsonObject.trip_title || 'Viagem Personalizada';
     // Lido DEPOIS da validação de propósito: se houve troca ou remoção, o
