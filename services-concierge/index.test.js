@@ -149,6 +149,9 @@ test('o caminho feliz: thinking e teto declarados, resposta conferida, custo gra
   );
   assert.equal(r.codigo, 200);
   assert.ok(!/38\.6916/.test(r.corpo.resposta), 'coordenada apagada');
+  // 3 antes, mais esta: 26 das 30 para as próximas 24 h.
+  assert.equal(r.corpo.restantes, 26);
+  assert.equal(r.corpo.limite, 30);
 
   const gemini = chamadas.find((c) => c.url.includes('generativelanguage'));
   const corpo = JSON.parse(gemini.corpo);
