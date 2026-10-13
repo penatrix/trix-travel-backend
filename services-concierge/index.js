@@ -182,7 +182,9 @@ async function mensagensNasUltimas24h(userId) {
 // SERVIÇO: O CONCIERGE DE UM ROTEIRO
 //
 // Entrada: { trip_id, mensagem, historico: [{ papel, texto }], lang }
-// Saída 200: { resposta }
+// Saída 200: { resposta, restantes, limite } -- quantas perguntas ainda
+//            cabem nas próximas 24 h, contando esta (13/10, o contador
+//            do protótipo de 11/10)
 // Erros: 401 sem conta, 400 pedido vazio, 403 roteiro de outra pessoa,
 //        402 roteiro que não é Premium ({ error, mensagem }, 06/10),
 //        429 limite diário ({ error, mensagem } pronto para a tela),
@@ -295,7 +297,11 @@ exports.conversarComConcierge = async (req, res) => {
       meta: { trocas_antes: historico.length, caracteres: texto.length },
     });
 
-    return res.status(200).json({ resposta: texto });
+    return res.status(200).json({
+      resposta: texto,
+      restantes: Math.max(0, LIMITE_DIARIO - (enviadas + 1)),
+      limite: LIMITE_DIARIO,
+    });
   } catch (erro) {
     const abortou = erro.name === 'AbortError';
     const msg = abortou
