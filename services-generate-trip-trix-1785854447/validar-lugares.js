@@ -42,6 +42,13 @@ const JANELAS = {
   noite: [18 * 60, 24 * 60],
 };
 
+/// Quanto o lugar precisa ficar aberto DENTRO da janela para contar como
+/// "abre neste período". Bastava um minuto, e a Fundação Serralves, que
+/// fecha às 19h, passou como atividade da noite (roteiro 406, 13/10):
+/// das 18h às 19h ela "abria". Noventa minutos é uma visita curta. Janela
+/// menor que isso (não há hoje) exige só que caiba inteira.
+const MINIMO_NA_JANELA = 90;
+
 /// O period vem no idioma do usuário. Aceita os dois e devolve a chave
 /// interna; qualquer outra coisa vira null e a atividade não é checada.
 function normalizarPeriodo(bruto) {
@@ -67,6 +74,7 @@ function horaParaMinutos(hhmm) {
 function abreNaJanela(periods, diaDaSemana, janela) {
   if (!Array.isArray(periods) || periods.length === 0) return null;
   const [inicio, fim] = janela;
+  const minimo = Math.min(MINIMO_NA_JANELA, fim - inicio);
 
   for (const p of periods) {
     const abre = p?.open;
@@ -83,14 +91,14 @@ function abreNaJanela(periods, diaDaSemana, janela) {
     // meia-noite e, para este dia, vale até o fim do dia.
     if (abre.day === diaDaSemana) {
       const ate = p.close.day === diaDaSemana ? tFecha : 24 * 60;
-      if (tAbre < fim && ate > inicio) return true;
+      if (Math.min(ate, fim) - Math.max(tAbre, inicio) >= minimo) return true;
     }
 
     // Trecho que começou ontem e ainda está aberto de madrugada. Raro na
     // janela da manhã, mas um bar que fecha às 04:00 cai aqui.
     const ontem = (diaDaSemana + 6) % 7;
     if (abre.day === ontem && p.close.day === diaDaSemana) {
-      if (fim > 0 && tFecha > inicio) return true;
+      if (Math.min(tFecha, fim) - inicio >= minimo) return true;
     }
   }
   return false;
@@ -853,6 +861,7 @@ module.exports = {
   normalizarPeriodo,
   diaDaSemanaDoDia,
   JANELAS,
+  MINIMO_NA_JANELA,
   // A reordenação é pura de propósito: recebe predicados em vez de falar
   // com o Google, e é por isso que dá para exercitar a regra assimétrica
   // (`=== true` para quem se muda, `!== false` para quem cede o slot) sem

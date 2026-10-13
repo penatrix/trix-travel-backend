@@ -202,3 +202,13 @@ test('o nível e o teto do jeito de gastar chegam ao prompt', () => {
   const p = montarPromptDaGeracao({ ...casos[0].linha, budget_level: 'Premium', budget_limit: 24000 });
   assert.match(p, /Total Budget: BRL 24000 for the WHOLE trip, the round trip from home included \(Level: Premium\)/);
 });
+
+test('o prompt proíbe as palavras que a voz da Trix evita', () => {
+  // "inesquecíveis" chegou à captura da loja na descrição do Castelo de
+  // São Jorge (13/10).
+  const p = montarPromptDaGeracao(casos[0].linha, casos[0].dna);
+  for (const palavra of ['inesquecível', 'imperdível', 'mágico', 'unforgettable']) {
+    assert.ok(p.includes(`"${palavra}"`), palavra);
+  }
+  assert.ok(p.includes('No emojis'));
+});

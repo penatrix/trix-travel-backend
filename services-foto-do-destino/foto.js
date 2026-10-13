@@ -347,6 +347,7 @@ const PALAVRAS_GENERICAS = new Set(
     'basilica capela chapel praca plaza square place parque park jardim garden ' +
     'mercado market restaurante restaurant cafe bar rua street avenida avenue ' +
     'ponte bridge castelo castle palacio palace torre tower mirante viewpoint ' +
+    'mosteiro monasterio monastery convento convent fortaleza fortress ' +
     'praia beach porto port casa house centro center centre galeria gallery ' +
     'teatro theatre theater bairro do da de dos das di del la le el the of and ' +
     'e em no na nos nas a o os as y st santa santo sao saint san ' +
@@ -380,6 +381,27 @@ function buscaDoLugar(alvo) {
   };
 }
 
+/// A segunda tentativa de um lugar: só as palavras próprias, sem o
+/// genérico na língua do roteiro. O Unsplash descreve as fotos em inglês,
+/// e "Mosteiro dos Jerónimos Lisbon" não achou a foto que "Jerónimos
+/// Monastery Lisbon" tinha achado (roteiro 406, 13/10); "jeronimos Lisbon"
+/// acha nas duas línguas. Só existe quando a consulta muda de fato.
+function buscaCurtaDoLugar(alvo) {
+  const principal = buscaDoLugar(alvo);
+  if (!principal) return null;
+  const cidade = String(alvo.cidade ?? '').trim();
+  const cidadeEn = CIDADES_EM_INGLES[normalizar(cidade)] ?? cidade;
+  const consulta = [principal.exigir.join(' '), cidadeEn].filter(Boolean).join(' ');
+  if (normalizar(consulta) === normalizar(principal.consulta)) return null;
+  return { ...principal, chave: `${principal.chave}|curta`, consulta };
+}
+
+/// As buscas de um lugar, na ordem: a do nome inteiro e, se mudar algo,
+/// a das palavras próprias.
+function buscasDoLugar(alvo) {
+  return [buscaDoLugar(alvo), buscaCurtaDoLugar(alvo)].filter(Boolean);
+}
+
 module.exports = {
   normalizar,
   paisEmIngles,
@@ -398,6 +420,8 @@ module.exports = {
   paraOApp,
   nomesDoLugar,
   chaveDoLugar,
+  buscaCurtaDoLugar,
+  buscasDoLugar,
   buscaDoLugar,
   comUtm,
   LARGURA_MINIMA,

@@ -238,10 +238,11 @@ async function fotoDoDestino(destino, resolver) {
 }
 
 async function fotoDoLugar(alvo, resolver) {
-  const busca = foto.buscaDoLugar(alvo);
-  if (!busca) return null;
-  const linha = await resolver(busca, 'lugar', alvo.pais);
-  return linha && linha.nivel !== 'nenhuma' ? linha : null;
+  for (const busca of foto.buscasDoLugar(alvo)) {
+    const linha = await resolver(busca, 'lugar', alvo.pais);
+    if (linha && linha.nivel !== 'nenhuma') return linha;
+  }
+  return null;
 }
 
 /// Roda as tarefas com no máximo `n` ao mesmo tempo, mantendo a ordem.
@@ -290,7 +291,7 @@ exports.fotoDoDestino = async (req, res) => {
   // de cada destino e cada lugar.
   const chaves = [
     ...destinos.flatMap((d) => foto.niveisDaBusca(d).map((n) => n.chave)),
-    ...lugares.map((l) => foto.buscaDoLugar(l)?.chave).filter(Boolean),
+    ...lugares.flatMap((l) => foto.buscasDoLugar(l).map((b) => b.chave)),
   ];
   let existentes;
   try {

@@ -118,6 +118,17 @@ function companhiaDoPerfil(lista) {
   return listaDeTexto(lista).map((c) => COMPANHIA[c]).filter(Boolean);
 }
 
+// A lista de "evitamos" da voz da Trix (CLAUDE.md, "Voz"), com o
+// equivalente em inglês para o roteiro em en. O texto do modelo chega à
+// tela sem filtro: um "inesquecíveis" na descrição do Castelo de São
+// Jorge apareceu na captura da loja (13/10).
+const PALAVRAS_PROIBIDAS = [
+  'mágico', 'inesquecível', 'imperdível', 'revolucionário',
+  'experiência única', 'destino dos sonhos', 'disruptivo', 'bora',
+  'magical', 'unforgettable', 'must-see', 'once-in-a-lifetime',
+  'dream destination',
+].map((p) => `"${p}"`).join(', ');
+
 function montarPromptDaGeracao(linha, travelDna) {
   const l = linha || {};
   const isPt = l.user_language === 'pt';
@@ -303,6 +314,7 @@ ${dateInstruction}
 ${densityBlock}
   CRITICAL INSTRUCTIONS AGAINST GENERIC CONTENT:
   - NEVER suggest generic categories like "a luxury hotel", "a local cafe", or "a nice seafood restaurant". You MUST provide SPECIFIC, real names of highly-rated establishments (e.g., "Copacabana Palace", "Confeitaria Colombo", "Fogo de Chão").
+  - TONE: describe with facts (what it is, why it fits this trip, how long, how much), never with hype. NEVER use these words or any form of them, in any language: ${PALAVRAS_PROIBIDAS}. No emojis anywhere in the JSON.
   - For accommodations: Suggest a SPECIFIC hotel or Airbnb region for each city that fits the user's budget level, and include its estimated cost.
   - For logistics: Don't just say "Visit the Christ the Redeemer". Tell the user HOW: "Buy tickets online in advance via the official Trem do Corcovado website. Take an Uber early in the morning to avoid crowds."
   - Provide specific cost estimates for EVERY single activity, meal, and accommodation in BRL.
@@ -432,4 +444,4 @@ ${backupBlock}
   }`;
 }
 
-module.exports = { montarPromptDaGeracao, ritmoDe, dietaryToDb, diasEntre, companhiaDoPerfil };
+module.exports = { montarPromptDaGeracao, PALAVRAS_PROIBIDAS, ritmoDe, dietaryToDb, diasEntre, companhiaDoPerfil };
