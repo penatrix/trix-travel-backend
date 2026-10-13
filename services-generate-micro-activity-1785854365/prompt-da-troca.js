@@ -29,6 +29,17 @@ const MAX_NOME = 150;
 const MAX_PEDIDO = 500;
 const MAX_CAMPO = 120;
 
+// A lista de "evitamos" da voz da Trix (CLAUDE.md do app, "Voz"), com o
+// equivalente em inglês. É a mesma do `prompt-da-geracao.js` do
+// generate-trip: cada serviço é construído só com a própria pasta, então
+// a lista vive nos dois. Mexeu numa, mexa na outra.
+const PALAVRAS_PROIBIDAS = [
+  'mágico', 'inesquecível', 'imperdível', 'revolucionário',
+  'experiência única', 'destino dos sonhos', 'disruptivo', 'bora',
+  'magical', 'unforgettable', 'must-see', 'once-in-a-lifetime',
+  'dream destination',
+].map((p) => `"${p}"`).join(', ');
+
 function texto(valor, teto) {
   if (valor === null || valor === undefined) return '';
   return String(valor).trim().slice(0, teto);
@@ -97,6 +108,7 @@ function montarPromptDaTroca({ cidade, periodo, custoAtual, evitar, pedido, idio
   5. RANKING: Order the array by how strongly you recommend it. The first item is your best pick; the other two are fallbacks, used only if the first one turns out to be closed or unavailable at that time of day.
   6. DISTINCT: The three must be different places. Do NOT repeat the same venue with different wording.
   7. OPENING HOURS: Every suggestion must be a place that is plausibly open during the **${periodo}**. Do not suggest a lunch-only restaurant for an evening slot, or a nightclub for a morning slot.
+  8. TONE: describe with facts, never with hype. NEVER use these words or any form of them, in any language: ${PALAVRAS_PROIBIDAS}. No emojis.
 
   Your response MUST be EXCLUSIVELY a raw JSON object matching this schema exactly (do NOT include the "period" key in your response):
   {

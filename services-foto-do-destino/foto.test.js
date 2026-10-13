@@ -187,3 +187,16 @@ test('lugar busca com o nome da cidade em inglês', () => {
   assert.strictEqual(b.consulta, 'Torre de Belém Lisbon');
   assert.match(b.chave, /^lugar\|/);
 });
+
+test('lugar sem foto pelo nome inteiro tenta só as palavras próprias', () => {
+  // "Mosteiro dos Jerónimos Lisbon" não achou foto; "Jerónimos Monastery
+  // Lisbon" tinha achado (13/10).
+  const alvo = { lugar: 'Mosteiro dos Jerónimos', cidade: 'Lisboa', pais: 'Portugal' };
+  const [inteira, curta] = f.buscasDoLugar(alvo);
+  assert.strictEqual(inteira.consulta, 'Mosteiro dos Jerónimos Lisbon');
+  assert.strictEqual(curta.consulta, 'jeronimos Lisbon');
+  assert.deepStrictEqual(curta.exigir, ['jeronimos']);
+  assert.strictEqual(curta.chave, `${inteira.chave}|curta`);
+  // Nome que já é só palavra própria não gasta uma segunda busca.
+  assert.strictEqual(f.buscasDoLugar({ lugar: 'Louvre', cidade: 'Paris', pais: 'França' }).length, 1);
+});
