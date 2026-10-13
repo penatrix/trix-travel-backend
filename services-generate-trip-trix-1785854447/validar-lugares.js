@@ -18,7 +18,10 @@
 // `consultarLugarNovo`.
 // =====================================================================
 
-const CONCORRENCIA = 5;        // consultas simultâneas ao Google
+// Consultas simultâneas ao Google. Eram 5; em 13/10 passaram a 10: um
+// roteiro de 10 dias faz 78 consultas, em lotes, e com 5 eram 16 voltas
+// em série. A cota do Places é por minuto e fica longe disso.
+const CONCORRENCIA = 10;
 const TIMEOUT_MS = 8000;       // por consulta
 
 const FECHADO = new Set(['CLOSED_TEMPORARILY', 'CLOSED_PERMANENTLY']);
