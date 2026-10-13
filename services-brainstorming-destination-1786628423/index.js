@@ -63,13 +63,14 @@ function verifyWebhookSecret(req) {
 // 'generating'. Abortando aqui dentro, a falha vira status 'failed' e o
 // usuário recebe retorno.
 //
-//   45s de teto + o catch e a escrita no Supabase  <  90s do Cloud Run
+//   70s de teto + o catch e a escrita no Supabase  <  90s do Cloud Run
 //
-// 45s é generoso para 3 cards: o roteiro inteiro, que é muito maior,
-// leva de 55s a 90s. Se o log de latência mostrar que sobra folga, dá
-// para apertar.
+// Eram 45s, e em 13/10 não bastaram: a mediana dos 30 dias é 15s e o p90
+// 22s, mas naquela manhã o Pro respondeu em 32s e 34s e estourou duas
+// vezes os 45s. 70s deixa 20s para o catch e a escrita, e o app espera
+// 90s pela linha.
 // =================================================================
-const GEMINI_TIMEOUT_MS = 45 * 1000;
+const GEMINI_TIMEOUT_MS = 70 * 1000;
 
 // =================================================================
 // NOVO SERVIÇO: GERAÇÃO DE BRAINSTORMING (TOPO DE FUNIL)
@@ -99,13 +100,18 @@ exports.generateBrainstorming = async (req, res) => {
     const currentStatus = sessionRecord.status;
 
     // =================================================================
-    // A NOSSA TRAVA CONTRA LOOP INFINITO (FAIL-FAST ATUALIZADO)
-    // Agora aceitamos 3 status:
-    // - generating (fluxo novo)
-    // - failed (usuário clicou em tentar novamente após erro)
-    // - refused (usuário deu "não gostei" nas 3 opções e quer novas)
+    // A TRAVA CONTRA LAÇO: só 'generating' roda.
+    //
+    // Até 13/10 'failed' e 'refused' também rodavam, e 'failed' fazia o
+    // laço que a trava devia impedir: o webhook é de INSERT e UPDATE, e o
+    // `catch` abaixo grava 'failed' -- que voltava aqui e rodava de novo,
+    // a cada falha, até uma dar certo. Medido em 13/10: a sessão 395f0ed9
+    // chamou o Pro três vezes, duas estourando 45s, depois que a pessoa
+    // já tinha pedido outra. Nenhum app grava 'failed' nem 'refused': o
+    // "tentar de novo" insere linha nova, o app antigo volta a linha para
+    // 'generating', e o "não gostei" vai em `excluded_destinations`.
     // =================================================================
-    if (!['generating', 'failed', 'refused'].includes(currentStatus)) {
+    if (currentStatus !== 'generating') {
       console.log(`[Segurança] Ignorando trigger. Brainstorming ${sessionRecord.id} com status: ${currentStatus}`);
       return res.status(200).json({ success: true, message: "Ignorado para evitar loop" });
     }
@@ -128,29 +134,9 @@ exports.generateBrainstorming = async (req, res) => {
     const legado = typeof sessionRecord.prompt_payload === 'string'
       && sessionRecord.prompt_payload.trim() !== '';
     origemDoPrompt = legado ? 'legado' : 'backend';
-    let finalPrompt = legado
+    const finalPrompt = legado
       ? sessionRecord.prompt_payload
       : montarPromptDoBrainstorming(sessionRecord);
-
-    // =================================================================
-    // ENGENHARIA DE PROMPT DINÂMICA (TRATAMENTO DO 'REFUSED')
-    // =================================================================
-    if (currentStatus === 'refused') {
-      const previousSuggestions = sessionRecord.ai_suggestions;
-      let rejectedNames = "";
-
-      // Tenta extrair os nomes das sugestões anteriores de forma segura
-      if (previousSuggestions && previousSuggestions.destinations && Array.isArray(previousSuggestions.destinations)) {
-        rejectedNames = previousSuggestions.destinations.map(d => d.title || d.city || 'Destino Desconhecido').join(', ');
-      }
-
-      if (rejectedNames) {
-        finalPrompt += `\n\nHIGH PRIORITY: The user rejected the following previously suggested destinations: [${rejectedNames}]. YOU ARE STRICTLY FORBIDDEN FROM SUGGESTING THOSE PLACES AGAIN. Look for completely different routes or profiles that still fit your budget and desired vibe.`;
-      } else {
-        finalPrompt += `\n\nHIGH PRIORITY: The user rejected the previous suggestions. Be much more creative this time and come up with options that go beyond the obvious.`;
-      }
-      console.log(`[Regeração] Modificando prompt do Brainstorming ${sessionId} para evitar destinos antigos.`);
-    }
 
     // 1. Chama a API do Gemini Pro
     //
