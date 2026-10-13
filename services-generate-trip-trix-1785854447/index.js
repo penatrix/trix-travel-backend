@@ -8,6 +8,13 @@ const {
   statusDoErro,
 } = require('./registra-evento');
 const { lerPedido, parametrosDoRefazer, erroParaATela } = require('./refazer');
+const {
+  planoDoAcrescimo,
+  montarPromptDoAcrescimo,
+  semRepeticao,
+  roteiroDasPecas,
+  aplicarAcrescimo,
+} = require('./acrescimo');
 
 // O modelo desta chamada, num lugar só.
 //
@@ -159,16 +166,13 @@ async function fetchGemini(url, body, rotulo) {
 }
 
 // =================================================================
-// A GERAÇÃO EM SI: prompt -> Gemini -> JSON -> passagem -> lugares.
+// O GEMINI E O JSON: a chamada, as checagens da resposta e o parse.
 //
-// Uma só, para a primeira geração (webhook do INSERT) e para o refazer
-// (webhook do UPDATE com `refazer_pedido`, 09/10). O que o `catch` de
-// quem chama precisa saber mesmo quando isto lança -- o uso do Gemini,
-// as chamadas ao Google e a passagem -- sai pelo `ctx`, preenchido à
-// medida que acontece: uma geração que quebra no JSON já gastou a
-// entrada, e a linha de erro precisa dizer quanto.
+// Saiu de dentro do `gerarEValidar` em 13/10 para o acréscimo do refazer
+// usar a mesma chamada, com o mesmo modelo, o mesmo thinking e as mesmas
+// checagens de MAX_TOKENS e de formato.
 // =================================================================
-async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
+async function pedirJsonAoGemini(promptText, tripId, ctx) {
   // 1. Chama a API do Gemini Pro com Thinking MEDIUM
   const geminiResponse = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
@@ -233,6 +237,23 @@ async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
 
   // Se o Gemini alucinou e gerou um JSON inválido, o código quebra nesta linha e vai direto pro catch
   const tripJsonObject = JSON.parse(cleanText);
+  return { tripJsonObject, tokenCount };
+}
+
+
+// =================================================================
+// A GERAÇÃO EM SI: prompt -> Gemini -> JSON -> passagem -> lugares.
+//
+// Uma só, para a primeira geração (webhook do INSERT) e para o refazer
+// (webhook do UPDATE com `refazer_pedido`, 09/10). O que o `catch` de
+// quem chama precisa saber mesmo quando isto lança -- o uso do Gemini,
+// as chamadas ao Google e a passagem -- sai pelo `ctx`, preenchido à
+// medida que acontece: uma geração que quebra no JSON já gastou a
+// entrada, e a linha de erro precisa dizer quanto.
+// =================================================================
+async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
+  // 1 e 2. O Gemini e o JSON.
+  const { tripJsonObject, tokenCount } = await pedirJsonAoGemini(promptText, tripId, ctx);
 
   // 2.4. A ida e volta da origem pelo grupo todo. O modelo dá o valor por
   // pessoa e o meio (`origin_transfer`); a multiplicação é daqui, porque
@@ -291,6 +312,58 @@ async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
   ctx.chamadasPlaces = resumoLugares.chamadas_places;
 
   return { tripJsonObject, tokenCount };
+}
+
+// =================================================================
+// O ACRÉSCIMO: o refazer que só acrescenta dias ou cidades (13/10).
+//
+// O modelo escreve só as peças que faltam (`acrescimo.js`), o código
+// tira o que repetir o roteiro de hoje, e o Google confere só os lugares
+// novos. Os dias de hoje não passam por nada disso: ficam como estão,
+// com Reservado e checklist.
+// =================================================================
+async function gerarAcrescimo(tripAtual, linhaNova, plano, dna, tripId, ctx) {
+  const promptText = montarPromptDoAcrescimo(
+    montarPromptDaGeracao(linhaNova, dna),
+    plano,
+    tripAtual.itinerary_json,
+    {
+      pt: tripAtual.user_language === 'pt',
+      travelers: Number(tripAtual.travelers_count) || null,
+    },
+  );
+  const { tripJsonObject: resposta, tokenCount } = await pedirJsonAoGemini(promptText, tripId, ctx);
+  if (!Array.isArray(resposta?.pieces) || resposta.pieces.length !== plano.pecas.length) {
+    throw new Error(
+      `Acréscimo veio com ${Array.isArray(resposta?.pieces) ? resposta.pieces.length : 0} peça(s); eram ${plano.pecas.length}.`,
+    );
+  }
+
+  const repeticao = semRepeticao(resposta.pieces, tripAtual.itinerary_json);
+  console.log(
+    `[Acréscimo] Trip ${tripId}: ${repeticao.trocadas} repetida(s) trocada(s), ` +
+    `${repeticao.removidas} removida(s).`,
+  );
+
+  // Só as peças vão ao Google, já com o número final de cada dia: a
+  // conferência de horário pelo dia da semana precisa dele.
+  const resumoLugares = await validarEConsertarRoteiro(
+    roteiroDasPecas(resposta.pieces, plano),
+    process.env.GOOGLE_MAPS_KEY,
+    { dataInicio: tripAtual.is_date_set === true ? tripAtual.start_date : null },
+  );
+  console.log(
+    `[Places] Trip ${tripId} (acréscimo): ${resumoLugares.verificados} verificados, ` +
+    `${resumoLugares.fechados} fechados, ${resumoLugares.trocados} trocados, ` +
+    `${resumoLugares.removidos} removidos.`,
+  );
+  ctx.chamadasPlaces = resumoLugares.chamadas_places;
+
+  return {
+    tripJsonObject: aplicarAcrescimo(tripAtual.itinerary_json, plano, resposta),
+    tokenCount,
+    repeticao,
+  };
 }
 
 // =================================================================
@@ -357,21 +430,34 @@ async function refazerRoteiro(tripAtual, res) {
       .eq('id', tripAtual.user_id)
       .maybeSingle();
     if (donoError) throw new Error(`Falha ao ler o perfil do dono: ${donoError.message}`);
-    const promptText = montarPromptDaGeracao(linhaNova, dono?.travel_dna ?? null);
+    // Só acrescenta? Então só as peças novas são escritas (13/10).
+    const plano = planoDoAcrescimo(tripAtual.itinerary_json, tripAtual.origin_city, pedido);
 
     console.log(
       `[Refazer] Trip ${tripId}: ${pedido.cidades.length} cidade(s), ` +
-      `origem ${pedido.origem ? 'definida' : 'vazia'}, nota ${pedido.nota ? 'sim' : 'não'}.`,
+      `origem ${pedido.origem ? 'definida' : 'vazia'}, nota ${pedido.nota ? 'sim' : 'não'}, ` +
+      `${plano ? `acréscimo de ${plano.pecas.length} peça(s)` : 'roteiro inteiro'}.`,
     );
 
-    const { tripJsonObject, tokenCount } = await gerarEValidar(linhaNova, promptText, tripId, geracao);
+    const { tripJsonObject, tokenCount } = plano
+      ? await gerarAcrescimo(tripAtual, linhaNova, plano, dono?.travel_dna ?? null, tripId, geracao)
+      : await gerarEValidar(
+        linhaNova,
+        montarPromptDaGeracao(linhaNova, dono?.travel_dna ?? null),
+        tripId,
+        geracao,
+      );
 
     const { data: gravadas, error: gravarError } = await supabase
       .from('trips')
       .update({
         ...novos,
         itinerary_json: tripJsonObject,
-        title: tripJsonObject.trip_title || 'Viagem Personalizada',
+        // O acréscimo não muda o nome: o roteiro é o mesmo, e a pessoa
+        // pode tê-lo renomeado.
+        title: plano
+          ? (tripAtual.title || tripJsonObject.trip_title || 'Viagem Personalizada')
+          : (tripJsonObject.trip_title || 'Viagem Personalizada'),
         tokens_used: tokenCount,
         budget_actual: tripJsonObject.estimated_cost_brl,
         refeito_em: new Date().toISOString(),
@@ -394,6 +480,7 @@ async function refazerRoteiro(tripAtual, res) {
       duracaoMs: Date.now() - comecou,
       meta: {
         refazer: true,
+        acrescimo: plano ? true : undefined,
         dias: diasDoRoteiro(linhaNova.start_date, linhaNova.end_date),
         viajantes: Number(tripAtual.travelers_count) || null,
         ritmo: tripAtual.pace_level || null,
