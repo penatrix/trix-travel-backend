@@ -145,3 +145,18 @@ cache a novas chamadas de API. Evite verbosidade no prompt.
   chamados pelo app com o JWT do Supabase no header `Authorization`.
   `searchPlaces` aceita chamadas sem token (usado no funil pré-cadastro),
   mas valida quando um token vem presente.
+- **Instância mínima: só o `search-places-trix` fica em 1** (decisão do
+  Paulo, 14/10). É a busca de destino, a primeira coisa que a pessoa faz,
+  e a partida a frio ali se vê. O preço é ~R$ 45 por mês de máquina
+  ligada; com faturamento "com base em solicitações", a parada sai mais
+  barata. Os outros ficam em 0. O `suggest-cities` foi criado à mão em
+  25/09 com mínima 1 e custou R$ 47,65 sem uso que justificasse; achado
+  em 14/10 e zerado. Como o `cloudbuild.yaml` usa `services update` sem
+  `--min-instances`, essa configuração vive só no console: serviço novo
+  criado à mão precisa ser conferido ali.
+- **Notificações push saem do `generateTrip`** (14/10, `aviso-push.js`):
+  pronto, falhou, refeito e refazer que falhou, pelo FCM v1, com o token
+  da conta de serviço padrão do Compute (papel "Firebase Cloud Messaging
+  API Admin"). O Firebase é o mesmo projeto do Cloud Run
+  (`gen-lang-client-0498734364`). Os aparelhos ficam em
+  `aparelhos_de_notificacao` (`scripts/p5.0` do app).
