@@ -188,7 +188,13 @@ async function pedirJsonAoGemini(promptText, tripId, ctx) {
         // custa o mesmo. O limite só é cobrado pelo que for gerado de
         // fato, então folga aqui não tem custo por si só.
         maxOutputTokens: 32768,
-        thinkingConfig: { thinkingLevel: "MEDIUM" }
+        thinkingConfig: { thinkingLevel: "MEDIUM" },
+        // JSON garantido pelo próprio modelo (14/10). Sem isto o texto
+        // é livre, e a trip 393 (12/10) falhou com "Expected ',' or '}'
+        // after property value": vírgula faltando no meio do roteiro, a
+        // única falha de geração desde setembro. O suggest-cities e o
+        // checar-datas já pedem assim.
+        responseMimeType: "application/json"
       }
     },
     `trip ${tripId}`,
