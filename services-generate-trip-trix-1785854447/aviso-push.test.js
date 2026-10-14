@@ -30,7 +30,7 @@ test('a mensagem leva o roteiro no data, em texto, e o link só na web', () => {
   const texto = textoDoAviso('pronto', { titulo: 'X' });
   const m = mensagemParaOAparelho('tok', 'ios', 'pronto', 406, texto).message;
   assert.deepEqual(m.data, { tipo: 'pronto', trip_id: '406' });
-  assert.equal(m.android.notification.channel_id, 'roteiro');
+  assert.equal(m.android.notification.tag, 'roteiro-406');
   assert.equal(m.webpush, undefined);
   const w = mensagemParaOAparelho('tok', 'web', 'pronto', 406, texto).message;
   assert.equal(w.webpush.fcm_options.link, 'https://app.trix.travel/');

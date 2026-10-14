@@ -75,9 +75,12 @@ function mensagemParaOAparelho(token, plataforma, tipo, tripId, texto) {
     token,
     notification: { title: texto.titulo, body: texto.corpo },
     data,
+    // Sem `channel_id`: o app não cria canal próprio, e o Android usa o
+    // padrão do Firebase. A `tag` faz o refeito substituir o pronto do
+    // mesmo roteiro, em vez de empilhar.
     android: {
       priority: 'high',
-      notification: { channel_id: 'roteiro', tag: `roteiro-${tripId}` },
+      notification: { tag: `roteiro-${tripId}` },
     },
     apns: {
       headers: { 'apns-collapse-id': `roteiro-${tripId}` },
