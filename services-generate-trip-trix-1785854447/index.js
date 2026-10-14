@@ -8,6 +8,7 @@ const {
   statusDoErro,
 } = require('./registra-evento');
 const { lerPedido, parametrosDoRefazer, erroParaATela } = require('./refazer');
+const { avisarDono } = require('./aviso-push');
 const {
   planoDoAcrescimo,
   montarPromptDoAcrescimo,
@@ -448,16 +449,18 @@ async function refazerRoteiro(tripAtual, res) {
         geracao,
       );
 
+    // O acréscimo não muda o nome: o roteiro é o mesmo, e a pessoa pode
+    // tê-lo renomeado.
+    const tituloRefeito = plano
+      ? (tripAtual.title || tripJsonObject.trip_title || 'Viagem Personalizada')
+      : (tripJsonObject.trip_title || 'Viagem Personalizada');
+
     const { data: gravadas, error: gravarError } = await supabase
       .from('trips')
       .update({
         ...novos,
         itinerary_json: tripJsonObject,
-        // O acréscimo não muda o nome: o roteiro é o mesmo, e a pessoa
-        // pode tê-lo renomeado.
-        title: plano
-          ? (tripAtual.title || tripJsonObject.trip_title || 'Viagem Personalizada')
-          : (tripJsonObject.trip_title || 'Viagem Personalizada'),
+        title: tituloRefeito,
         tokens_used: tokenCount,
         budget_actual: tripJsonObject.estimated_cost_brl,
         refeito_em: new Date().toISOString(),
@@ -514,6 +517,13 @@ async function refazerRoteiro(tripAtual, res) {
     }
 
     console.log(`[Refazer] Trip ${tripId}: refeito em ${Date.now() - comecou}ms.`);
+    await avisarDono(supabase, {
+      userId: tripAtual.user_id,
+      tripId,
+      tipo: 'refeito',
+      titulo: tituloRefeito,
+      idioma: lang,
+    });
     return res.status(200).json({ success: true });
   } catch (error) {
     console.error(`[Refazer] Trip ${tripId}: falhou - ${error.message}`);
@@ -542,6 +552,13 @@ async function refazerRoteiro(tripAtual, res) {
     } catch (dbError) {
       console.error(`[Refazer] Trip ${tripId}: não consegui zerar o pedido -`, dbError);
     }
+    await avisarDono(supabase, {
+      userId: tripAtual.user_id,
+      tripId,
+      tipo: 'refazer_falhou',
+      titulo: tripAtual.title,
+      idioma: lang,
+    });
     return res.status(500).json({ error: error.message });
   }
 }
@@ -847,6 +864,16 @@ exports.generateTrip = async (req, res) => {
       return res.status(200).json({ success: true, message: 'Resultado descartado: linha já não estava em generating' });
     }
 
+    // Com `await`: no Cloud Run a CPU só é garantida enquanto a resposta
+    // não saiu. O aviso nunca lança, e os envios têm teto de 5 s.
+    await avisarDono(supabase, {
+      userId: tripRecord.user_id,
+      tripId,
+      tipo: 'pronto',
+      titulo: tripTitle,
+      idioma: tripAtual?.user_language,
+    });
+
     return res.status(200).json({ success: true });
 
   } catch (error) {
@@ -931,6 +958,12 @@ exports.generateTrip = async (req, res) => {
       } catch (refundError) {
         console.error(`[Estorno] Trip ${tripId}: erro inesperado -`, refundError);
       }
+    }
+
+    // O aviso no aparelho, se a pessoa saiu da tela de espera. Só com o
+    // dono conhecido: antes disso a falha é do pedido, não de um roteiro.
+    if (tripId && userId) {
+      await avisarDono(supabase, { userId, tripId, tipo: 'falhou' });
     }
 
     // Retorna 500 para o Supabase Webhook saber que a chamada não foi lisa,
