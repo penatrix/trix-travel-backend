@@ -9,6 +9,7 @@ const {
 } = require('./registra-evento');
 const { lerPedido, parametrosDoRefazer, erroParaATela } = require('./refazer');
 const { avisarDono } = require('./aviso-push');
+const { comSegundaTentativa, somarUso } = require('./json-de-novo');
 const {
   planoDoAcrescimo,
   montarPromptDoAcrescimo,
@@ -173,7 +174,26 @@ async function fetchGemini(url, body, rotulo) {
 // usar a mesma chamada, com o mesmo modelo, o mesmo thinking e as mesmas
 // checagens de MAX_TOKENS e de formato.
 // =================================================================
+// O JSON quebrado pede de novo, uma vez (ver `json-de-novo.js`). O uso
+// das duas tentativas vai somado para o custo da geração.
 async function pedirJsonAoGemini(promptText, tripId, ctx) {
+  let usoDaPrimeira = null;
+  let tokensDaPrimeira = 0;
+  const resultado = await comSegundaTentativa(
+    () => pedirJsonUmaVez(promptText, tripId, ctx),
+    (erro) => {
+      usoDaPrimeira = ctx.usoDoGemini;
+      tokensDaPrimeira = usoDaPrimeira?.totalTokenCount ?? 0;
+      console.warn(`[Geração] Trip ${tripId}: JSON quebrado (${erro.message}). Pedindo de novo.`);
+    },
+  );
+  if (usoDaPrimeira) {
+    ctx.usoDoGemini = somarUso(usoDaPrimeira, ctx.usoDoGemini);
+  }
+  return { ...resultado, tokenCount: resultado.tokenCount + tokensDaPrimeira };
+}
+
+async function pedirJsonUmaVez(promptText, tripId, ctx) {
   // 1. Chama a API do Gemini Pro com Thinking MEDIUM
   const geminiResponse = await fetchGemini(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
