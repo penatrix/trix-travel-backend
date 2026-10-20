@@ -5,6 +5,7 @@ const {
   statusDoErro,
 } = require('./registra-evento');
 const { montarPromptDoBrainstorming } = require('./prompt-do-brainstorming');
+const { chamarComTentativas } = require('./tentativas-do-gemini');
 
 // O modelo desta chamada, num lugar só.
 //
@@ -55,22 +56,10 @@ function verifyWebhookSecret(req) {
 
 
 // =================================================================
-// Teto da chamada ao Gemini.
-//
-// Precisa ser MENOR que o --timeout do Cloud Run (90s, no
-// cloudbuild.yaml deste serviço), senão quem corta é a plataforma - e aí
-// o processo morre, o catch não roda e a linha fica presa em
-// 'generating'. Abortando aqui dentro, a falha vira status 'failed' e o
-// usuário recebe retorno.
-//
-//   70s de teto + o catch e a escrita no Supabase  <  90s do Cloud Run
-//
-// Eram 45s, e em 13/10 não bastaram: a mediana dos 30 dias é 15s e o p90
-// 22s, mas naquela manhã o Pro respondeu em 32s e 34s e estourou duas
-// vezes os 45s. 70s deixa 20s para o catch e a escrita, e o app espera
-// 90s pela linha.
+// Chamada ao Gemini: duas tentativas num prazo só, que cabe no
+// --timeout do Cloud Run. Números e conta em `tentativas-do-gemini.js`
+// (20/10). Antes era um teto único de 70s (45s até 13/10).
 // =================================================================
-const GEMINI_TIMEOUT_MS = 70 * 1000;
 
 // =================================================================
 // NOVO SERVIÇO: GERAÇÃO DE BRAINSTORMING (TOPO DE FUNIL)
@@ -148,39 +137,27 @@ exports.generateBrainstorming = async (req, res) => {
     // justamente no topo do funil, onde a latência mais dói.
     //
     // Agora está declarado. LOW porque a tarefa é devolver 3 cards curtos,
-    // não planejar uma viagem.
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-
-    let geminiResponse;
-    const inicio = Date.now();
-    try {
-      geminiResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
+    // não planejar uma viagem -- o nível vem do plano de tentativas.
+    //
+    // Sem teto, a chamada ficava pendurada até o Cloud Run cortar - e
+    // quando o Cloud Run corta, ele mata o processo: o catch lá embaixo
+    // não roda e a linha fica presa em 'generating' para sempre. O prazo
+    // das tentativas é o que garante que a falha vire status 'failed'.
+    const { resposta: geminiResponse } = await chamarComTentativas(
+      ({ thinking, signal }) => fetch(`https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           contents: [{ role: "user", parts: [{ text: finalPrompt }] }],
           generationConfig: {
             maxOutputTokens: 4096, // 4k é mais que suficiente para um JSON com 3 cards
-            thinkingConfig: { thinkingLevel: "LOW" }
+            thinkingConfig: { thinkingLevel: thinking }
           }
         }),
-        signal: controller.signal,
-      });
-    } catch (erro) {
-      // Sem este teto a chamada ficava pendurada até o Cloud Run cortar - e
-      // quando o Cloud Run corta, ele mata o processo: o catch lá embaixo
-      // não roda e a linha fica presa em 'generating' para sempre. Abortar
-      // aqui dentro é o que garante que a falha vire status 'failed'.
-      if (erro.name === 'AbortError') {
-        throw new Error(`Gemini não respondeu em ${GEMINI_TIMEOUT_MS / 1000}s no brainstorming.`);
-      }
-      throw erro;
-    } finally {
-      clearTimeout(timer);
-    }
-
-    console.log(`[Brainstorming] Gemini respondeu em ${Date.now() - inicio}ms.`);
+        signal,
+      }),
+      `brainstorming ${sessionId}`,
+    );
 
     if (!geminiResponse.ok) {
       const errorText = await geminiResponse.text();
