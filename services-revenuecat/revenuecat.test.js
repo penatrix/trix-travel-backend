@@ -68,6 +68,7 @@ test('produto: os quatro identificadores das duas lojas', () => {
 test('loja: só Play e App Store', () => {
   assert.strictEqual(lojaDoEvento('PLAY_STORE'), 'google');
   assert.strictEqual(lojaDoEvento('APP_STORE'), 'apple');
+  assert.strictEqual(lojaDoEvento('RC_BILLING'), 'web');
   assert.strictEqual(lojaDoEvento('STRIPE'), null);
   assert.strictEqual(lojaDoEvento('PROMOTIONAL'), null);
 });
@@ -132,6 +133,10 @@ test('o resto é ignorado ou recusado', () => {
     assert.strictEqual(lerEvento(aviso({ type: tipo })).acao, 'ignorar', tipo);
   }
   assert.strictEqual(lerEvento(aviso({ store: 'STRIPE' })).acao, 'ignorar');
+  const daWeb = lerEvento(aviso({ store: 'RC_BILLING', product_id: 'travel.trix.app.premium.roteiro' }));
+  assert.strictEqual(daWeb.acao, 'registrar');
+  assert.strictEqual(daWeb.loja, 'web');
+  assert.strictEqual(daWeb.tipo, 'trip_credit');
   assert.strictEqual(lerEvento(aviso({ product_id: 'outra_coisa' })).acao, 'desconhecido');
   assert.strictEqual(lerEvento(aviso({ transaction_id: undefined })).acao, 'invalido');
   assert.strictEqual(lerEvento({}).acao, 'invalido');

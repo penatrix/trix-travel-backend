@@ -46,11 +46,14 @@ function tipoDoProduto(produto) {
   return null;
 }
 
-/// A loja como a `purchases` guarda. Outras (Stripe, promocional do
-/// painel) não vendem nada da Trix hoje.
+/// A loja como a `purchases` guarda. `RC_BILLING` é a venda pelo site
+/// (Web Billing do RevenueCat, com o Stripe por baixo, desde 20/10). O
+/// `STRIPE` puro (checkout montado direto no Stripe) e o promocional do
+/// painel não vendem nada da Trix.
 function lojaDoEvento(store) {
   if (store === 'PLAY_STORE') return 'google';
   if (store === 'APP_STORE' || store === 'MAC_APP_STORE') return 'apple';
+  if (store === 'RC_BILLING') return 'web';
   return null;
 }
 
