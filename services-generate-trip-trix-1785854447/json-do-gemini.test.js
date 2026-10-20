@@ -16,8 +16,10 @@ test('a geração pede application/json ao Gemini', () => {
   assert.notStrictEqual(inicio, -1, 'não achei pedirJsonUmaVez');
   const corpo = fonte.slice(inicio, fonte.indexOf('\n}\n', inicio));
   assert.match(corpo, /responseMimeType: "application\/json"/);
-  // O thinking e o teto continuam explícitos no ponto de chamada.
-  assert.match(corpo, /thinkingConfig: \{ thinkingLevel: "MEDIUM" \}/);
+  // O thinking e o teto continuam explícitos no ponto de chamada. O
+  // nível vem da tentativa (MEDIUM, MEDIUM, LOW: tentativas-do-gemini.js).
+  assert.match(corpo, /thinkingConfig: \{ thinkingLevel: thinking \}/);
+  assert.match(corpo, /chamarComTentativas\(/);
   assert.match(corpo, /maxOutputTokens: 32768/);
 });
 

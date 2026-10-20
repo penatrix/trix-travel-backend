@@ -10,6 +10,7 @@ const {
 const { lerPedido, parametrosDoRefazer, erroParaATela } = require('./refazer');
 const { avisarDono } = require('./aviso-push');
 const { comSegundaTentativa, somarUso } = require('./json-de-novo');
+const { chamarComTentativas, PRAZO_TOTAL_MS } = require('./tentativas-do-gemini');
 const {
   planoDoAcrescimo,
   montarPromptDoAcrescimo,
@@ -67,37 +68,10 @@ function verifyWebhookSecret(req) {
 
 
 // =================================================================
-// Chamada ao Gemini com timeout explícito e uma retentativa.
-//
-// O fetch do Node não tem timeout padrão: sem AbortController, uma
-// conexão pendurada fica pendurada até alguém cortar - e quem cortava
-// era o Cloud Run, devolvendo o opaco "fetch failed".
-//
-// Uma retentativa só, e só em falha de REDE. Erro HTTP (429, 500) já é
-// tratado por quem chama, e repetir uma geração cara às cegas é pior do
-// que falhar rápido.
-//
-// O TETO PRECISA CABER DENTRO DO CLOUD RUN, e antes não cabia: eram 8
-// minutos por tentativa, duas tentativas, 960s - contra o --timeout=900
-// do cloudbuild.yaml deste serviço. Quando o Cloud Run corta, ele mata o
-// processo: o 'catch' lá embaixo NÃO roda, a row fica presa em
-// 'generating' para sempre e a cota fica cobrada sem estorno. É a
-// armadilha "falha de job silenciosa" e a perda de crédito da 242 no
-// mesmo ponto - e a retentativa, que existe justamente por causa da 242,
-// era o que reabria a janela.
-//
-// A conta agora fecha com folga:
-//
-//   2 tentativas x 300s = 600s
-//   + validação de lugares (duas passadas ao Google, 8s por consulta,
-//     concorrência 5: ~105s no pior caso de um roteiro grande)
-//   + escritas no Supabase
-//   = ~750s contra o teto de 900s
-//
-// Se mexer em um dos dois números, refaça a conta. Aumentar este teto
-// sem aumentar o --timeout traz o bug de volta exatamente como estava.
+// Chamada ao Gemini: timeout explícito, três tentativas e um prazo
+// comum. O plano, o porquê de cada número e a conta contra o --timeout
+// do Cloud Run estão em `tentativas-do-gemini.js` (20/10).
 // =================================================================
-const GEMINI_TIMEOUT_MS = 5 * 60 * 1000;
 
 /// Duração em dias, contando as duas pontas -- é a mesma conta que o
 /// wizard faz para respeitar o teto de 30.
@@ -133,40 +107,6 @@ function contarAtividades(roteiro) {
   return n || null;
 }
 
-async function fetchGemini(url, body, rotulo) {
-  for (let tentativa = 1; tentativa <= 2; tentativa++) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
-    try {
-      // Mede quanto a geração leva de fato. Não havia número nenhum aqui:
-      // o teto de 8 minutos tinha sido escolhido no escuro, e sem medida
-      // não dá para saber se 300s é folga ou aperto. Mesmo formato que o
-      // generate-micro-activity já usa.
-      const inicio = Date.now();
-      const resposta = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-      console.log(
-        `[Gemini] ${rotulo}: respondeu em ${Date.now() - inicio}ms (tentativa ${tentativa}).`,
-      );
-      return resposta;
-    } catch (erro) {
-      const motivo = erro.name === 'AbortError'
-        ? `timeout de ${GEMINI_TIMEOUT_MS / 1000}s`
-        : (erro.cause?.code || erro.message);
-      console.error(`[Gemini] ${rotulo}: tentativa ${tentativa} falhou (${motivo}).`);
-      if (tentativa === 2) {
-        throw new Error(`Falha de rede ao chamar o Gemini (${rotulo}): ${motivo}`);
-      }
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-}
-
 // =================================================================
 // O GEMINI E O JSON: a chamada, as checagens da resposta e o parse.
 //
@@ -177,6 +117,9 @@ async function fetchGemini(url, body, rotulo) {
 // O JSON quebrado pede de novo, uma vez (ver `json-de-novo.js`). O uso
 // das duas tentativas vai somado para o custo da geração.
 async function pedirJsonAoGemini(promptText, tripId, ctx) {
+  // Um prazo só para os dois pedidos do JSON e todas as tentativas de
+  // cada um: é ele que mantém a geração dentro do --timeout do Cloud Run.
+  ctx.fimDoGemini ??= Date.now() + PRAZO_TOTAL_MS;
   let usoDaPrimeira = null;
   let tokensDaPrimeira = 0;
   const resultado = await comSegundaTentativa(
@@ -194,31 +137,50 @@ async function pedirJsonAoGemini(promptText, tripId, ctx) {
 }
 
 async function pedirJsonUmaVez(promptText, tripId, ctx) {
-  // 1. Chama a API do Gemini Pro com Thinking MEDIUM
-  const geminiResponse = await fetchGemini(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-    {
-      contents: [{ role: "user", parts: [{ text: promptText }] }],
-      generationConfig: {
-        // 16384 era suficiente quando o roteiro saía com ~13 atividades e
-        // 4 backups fixos. Hoje um Action-packed de 8 dias pede 40
-        // atividades + 8 backups, cada uma com descrição, logística e
-        // custo em pt-BR. Estourar o teto não devolve um roteiro menor:
-        // devolve um JSON cortado no meio, que quebra no JSON.parse e
-        // custa o mesmo. O limite só é cobrado pelo que for gerado de
-        // fato, então folga aqui não tem custo por si só.
-        maxOutputTokens: 32768,
-        thinkingConfig: { thinkingLevel: "MEDIUM" },
-        // JSON garantido pelo próprio modelo (14/10). Sem isto o texto
-        // é livre, e a trip 393 (12/10) falhou com "Expected ',' or '}'
-        // after property value": vírgula faltando no meio do roteiro, a
-        // única falha de geração desde setembro. O suggest-cities e o
-        // checar-datas já pedem assim.
-        responseMimeType: "application/json"
-      }
-    },
+  // 1. Chama a API do Gemini Pro. O thinking é o da tentativa.
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const chamada = await chamarComTentativas(
+    ({ thinking, signal }) => fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        {
+          contents: [{ role: "user", parts: [{ text: promptText }] }],
+          generationConfig: {
+            // 16384 era suficiente quando o roteiro saía com ~13 atividades e
+            // 4 backups fixos. Hoje um Action-packed de 8 dias pede 40
+            // atividades + 8 backups, cada uma com descrição, logística e
+            // custo em pt-BR. Estourar o teto não devolve um roteiro menor:
+            // devolve um JSON cortado no meio, que quebra no JSON.parse e
+            // custa o mesmo. O limite só é cobrado pelo que for gerado de
+            // fato, então folga aqui não tem custo por si só.
+            maxOutputTokens: 32768,
+            // MEDIUM nas duas primeiras tentativas e LOW na terceira
+            // (`tentativas-do-gemini.js`).
+            thinkingConfig: { thinkingLevel: thinking },
+            // JSON garantido pelo próprio modelo (14/10). Sem isto o texto
+            // é livre, e a trip 393 (12/10) falhou com "Expected ',' or '}'
+            // after property value": vírgula faltando no meio do roteiro, a
+            // única falha de geração desde setembro. O suggest-cities e o
+            // checar-datas já pedem assim.
+            responseMimeType: "application/json"
+          }
+        },
+      ),
+      signal,
+    }),
     `trip ${tripId}`,
+    { fim: ctx.fimDoGemini },
   );
+  // Para o evento da geração: quanto o Gemini levou sozinho, em qual
+  // tentativa e com que thinking. É o número que calibra o plano.
+  ctx.gemini = {
+    ms: chamada.ms,
+    tentativa: chamada.tentativa,
+    thinking: chamada.thinking,
+  };
+  const geminiResponse = chamada.resposta;
 
   // Fail-fast: Verifica se a API do Gemini rejeitou a requisição (ex: Timeout ou Rate Limit)
   if (!geminiResponse.ok) {
@@ -516,6 +478,7 @@ async function refazerRoteiro(tripAtual, res) {
         atividades: contarAtividades(tripJsonObject),
         prompt: 'backend',
         passagem: geracao.passagem?.modo ?? null,
+        gemini: geracao.gemini ?? null,
       },
     });
 
@@ -563,7 +526,7 @@ async function refazerRoteiro(tripAtual, res) {
       uso: geracao.usoDoGemini,
       chamadasPlaces: geracao.chamadasPlaces,
       duracaoMs: Date.now() - comecou,
-      meta: { refazer: true },
+      meta: { refazer: true, gemini: geracao.gemini ?? null },
     });
     // O roteiro fica como estava. Só o pedido sai, com a frase.
     try {
@@ -603,6 +566,8 @@ exports.generateTrip = async (req, res) => {
   // cobrada mesmo quando a saída não chega.
   let usoDoGemini = null;
   let chamadasPlaces = null;
+  // Quanto o Gemini levou sozinho, em que tentativa e com que thinking.
+  let gemini = null;
 
   // Declaramos o tripId aqui em cima para o bloco 'catch' ter acesso a ele
   let tripId = null;
@@ -805,6 +770,7 @@ exports.generateTrip = async (req, res) => {
       usoDoGemini = geracao.usoDoGemini;
       passagem = geracao.passagem;
       chamadasPlaces = geracao.chamadasPlaces;
+      gemini = geracao.gemini ?? null;
     }
     const { tripJsonObject, tokenCount } = resultado;
 
@@ -818,16 +784,17 @@ exports.generateTrip = async (req, res) => {
     // O `.eq('status', 'generating')` é o ponto da coisa, não detalhe.
     //
     // Existe um job de pg_cron rodando de minuto em minuto que marca como
-    // 'failed' qualquer linha presa em 'generating' há mais de 3 minutos -
+    // 'failed' qualquer linha presa em 'generating' há mais de 15 minutos
+    // (`recolher_roteiros_travados`; eram 3 quando este texto nasceu) -
     // e ele passou a ESTORNAR o crédito junto. Ou seja: a partir do
     // momento em que ele desiste de uma geração, o usuário já recebeu o
     // dinheiro de volta.
     //
     // Sem esta condição, uma geração lenta que terminasse depois disso
     // sobrescreveria o 'failed' com 'ready' e a pessoa ficaria com o
-    // roteiro E com o crédito: viagem de graça. O caminho de retentativa
-    // chega lá por construção - duas tentativas de 5 minutos passam dos 3
-    // do job.
+    // roteiro E com o crédito: viagem de graça. O prazo das tentativas
+    // do Gemini (`tentativas-do-gemini.js`) foi feito para não chegar lá,
+    // mas a condição é o que garante.
     //
     // Com a condição, quem desistiu primeiro decide. A geração atrasada é
     // descartada e a pessoa refaz sem custo, porque o crédito já voltou.
@@ -876,6 +843,7 @@ exports.generateTrip = async (req, res) => {
         // O meio da ida e volta, para medir quanto roteiro sai de ônibus
         // ou carro. Nulo sem cidade de origem.
         passagem: passagem?.modo ?? null,
+        gemini,
       },
     });
 
@@ -930,7 +898,9 @@ exports.generateTrip = async (req, res) => {
       uso: usoDoGemini,
       chamadasPlaces,
       duracaoMs: Date.now() - comecou,
-      meta: origemDoPrompt ? { prompt: origemDoPrompt } : null,
+      meta: origemDoPrompt || gemini
+        ? { prompt: origemDoPrompt, gemini }
+        : null,
     });
 
     // 4. A REDE DE SEGURANÇA: Se temos um tripId, avisamos o app que falhou
