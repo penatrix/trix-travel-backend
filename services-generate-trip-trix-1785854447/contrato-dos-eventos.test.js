@@ -55,7 +55,7 @@ function fonteDo(servico) {
 /// Onde começa o tratamento de erro do handler.
 ///
 /// O `catch` do handler é o ÚLTIMO recuado em dois espaços: os de
-/// dentro (o `verifySupabaseAuth`, o `fetchGemini`, os dois do estorno)
+/// dentro (o `verifySupabaseAuth`, os dois do estorno)
 /// ou estão mais fundo ou vêm antes. Procurar só por `} catch` pegava o
 /// `catch (dbError)` aninhado no fim do generate-trip, e o teste
 /// concluía que o handler não registrava falha quando registrava.

@@ -221,11 +221,11 @@ describe('a falha também é um número', () => {
     });
 
     test('a mensagem que os handlers montam é timeout', () => {
-      // É exatamente o texto que `fetchGemini` lança na segunda
-      // tentativa, e o que o brainstorming e a troca de atividade
+      // É exatamente o texto que `chamarComTentativas`
+      // (tentativas-do-gemini.js) lança quando nenhuma tentativa responde, e o que o brainstorming e a troca de atividade
       // montam quando abortam.
       assert.equal(
-        statusDoErro(new Error('Falha de rede ao chamar o Gemini (roteiro): timeout de 300s')),
+        statusDoErro(new Error('Falha de rede ao chamar o Gemini (roteiro): timeout de 240s')),
         'timeout',
       );
       assert.equal(
