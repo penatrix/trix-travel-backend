@@ -150,3 +150,24 @@ test('o que se guarda não leva atributos de assinante', () => {
   });
   assert.deepStrictEqual(guardado, { type: 'INITIAL_PURCHASE' });
 });
+
+test('transferência: passa o anual da conta antiga para a nova (21/10)', () => {
+  const NOVA = '99999999-8888-7777-6666-555555555555';
+  const lido = lerEvento({ event: {
+    type: 'TRANSFER',
+    store: 'APP_STORE',
+    transferred_from: [CONTA, '$RCAnonymousID:abc'],
+    transferred_to: ['$RCAnonymousID:def', NOVA],
+  } });
+  assert.strictEqual(lido.acao, 'transferir');
+  assert.strictEqual(lido.conta, NOVA);
+  assert.deepStrictEqual(lido.de, [CONTA, '$RCAnonymousID:abc']);
+
+  // Para um id anônimo, ou sem origem, não há conta da Trix a quem dar.
+  assert.strictEqual(lerEvento({ event: {
+    type: 'TRANSFER', transferred_from: [CONTA], transferred_to: ['$RCAnonymousID:def'],
+  } }).acao, 'ignorar');
+  assert.strictEqual(lerEvento({ event: {
+    type: 'TRANSFER', transferred_from: [], transferred_to: [NOVA],
+  } }).acao, 'ignorar');
+});
