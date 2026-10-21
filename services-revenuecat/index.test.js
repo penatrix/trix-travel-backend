@@ -122,6 +122,19 @@ test('expiração do anual: expirar_assinatura com a data', async () => {
     { p_user_id: CONTA, p_expirou_em: '2027-10-08T00:00:00.000Z' });
 });
 
+test('transferência: transferir_assinatura com quem perdeu e quem ganhou', async () => {
+  const NOVA = '99999999-8888-7777-6666-555555555555';
+  respostas.push([200, { transferiu: true, valido_ate: '2026-10-22T18:45:36+00:00' }]);
+  const res = resposta();
+  await avisoDoRevenuecat(pedido({ api_version: '1.0', event: {
+    id: 'ev-2', type: 'TRANSFER', store: 'APP_STORE',
+    transferred_from: [CONTA], transferred_to: [NOVA],
+  } }), res);
+  assert.strictEqual(res.r.codigo, 200);
+  assert.match(chamadas[0].url, /rpc\/transferir_assinatura$/);
+  assert.deepStrictEqual(chamadas[0].corpo, { p_de: [CONTA], p_para: NOVA });
+});
+
 test('aviso ignorado ou de produto desconhecido: 200, sem banco', async () => {
   for (const campos of [
     { type: 'TEST' },

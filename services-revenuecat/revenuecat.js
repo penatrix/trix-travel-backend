@@ -80,6 +80,7 @@ const quando = (ms) =>
 ///   registrar   compra nova ou renovação (`registrar_compra`)
 ///   reembolsar  a loja devolveu o dinheiro (`reembolsar_compra`)
 ///   expirar     o anual acabou sem renovar (`expirar_assinatura`)
+///   transferir  a assinatura passou a outra conta (`transferir_assinatura`)
 ///   ignorar     com `motivo`, para o log
 ///
 /// Cancelar a renovação NÃO tira o Premium: o anual vale até o fim do
@@ -107,6 +108,21 @@ function lerEvento(corpo) {
     transacaoOriginal: evento.original_transaction_id ?? null,
     ambiente: evento.environment ?? null,
   };
+
+  // A assinatura passou de uma conta da Trix para outra (21/10). É o que
+  // o RevenueCat faz quando a conta da loja que assinou entra noutra
+  // conta da Trix e compra ou restaura: o aviso não traz produto nem
+  // transação, só quem perdeu e quem ganhou. Ignorado, o Premium ficava
+  // na conta antiga -- ou em nenhuma, se ela tinha sido apagada.
+  if (tipoDoEvento === 'TRANSFER') {
+    const para = (Array.isArray(evento.transferred_to) ? evento.transferred_to : [])
+      .find((c) => typeof c === 'string' && UUID.test(c)) ?? null;
+    const de = (Array.isArray(evento.transferred_from) ? evento.transferred_from : [])
+      .filter((c) => typeof c === 'string' && c.length > 0);
+    if (!para) return { ...base, acao: 'ignorar', motivo: 'transferência sem conta da Trix' };
+    if (!de.length) return { ...base, acao: 'ignorar', motivo: 'transferência sem origem' };
+    return { ...base, acao: 'transferir', conta: para, de };
+  }
 
   const compra = ['INITIAL_PURCHASE', 'RENEWAL', 'NON_RENEWING_PURCHASE'];
   const relevante = [...compra, 'CANCELLATION', 'EXPIRATION'];

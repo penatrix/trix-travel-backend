@@ -10,9 +10,10 @@ const {
 //
 // O app vende pelo Google Play e pela App Store através do RevenueCat,
 // que confere o recibo com a loja e avisa aqui por webhook. Este serviço
-// só traduz o aviso numa das três funções do banco (scripts/p4.3 do
-// app): registrar_compra, reembolsar_compra, expirar_assinatura. O app
-// nunca grava compra; ele espera o plano mudar.
+// só traduz o aviso numa das funções do banco (scripts/p4.3 e p5.3 do
+// app): registrar_compra, reembolsar_compra, expirar_assinatura e
+// transferir_assinatura. O app nunca grava compra; ele espera o plano
+// mudar.
 //
 // Quem chama é o RevenueCat, não o app: não há token do Supabase. A
 // porta é o cabeçalho Authorization cadastrado no painel do RevenueCat,
@@ -87,6 +88,19 @@ async function tratar(config, lido, evento) {
       console.error(`[RevenueCat] Reembolso de compra desconhecida: ${rotulo} ${lido.transacao}.`);
     } else {
       console.log(`[RevenueCat] Reembolsada (${r.revogou} revogado): ${rotulo}.`);
+    }
+    return;
+  }
+
+  if (lido.acao === 'transferir') {
+    const r = await chamar(config, 'transferir_assinatura', {
+      p_de: lido.de,
+      p_para: lido.conta,
+    });
+    if (!r?.transferiu) {
+      console.log(`[RevenueCat] Transferência sem anual ativo para passar: ${rotulo} (de ${lido.de.join(', ')}).`);
+    } else {
+      console.log(`[RevenueCat] Anual transferido até ${r.valido_ate}: ${rotulo} (de ${lido.de.join(', ')}).`);
     }
     return;
   }
