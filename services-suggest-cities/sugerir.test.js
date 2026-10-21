@@ -170,3 +170,22 @@ test('em inglês, a resposta vem em inglês', () => {
   assert.ok(p.includes('are in English'));
   assert.ok(p.includes('Florence, Italy'));
 });
+
+test('as cidades do roteiro trazem os lugares de prova, limpos (21/10)', () => {
+  const prompt = montarPrompt({ destination: 'Finlândia', days: 14, maxCities: 7, vibes: ['Gastronomia'] });
+  assert.match(prompt, /"highlights"/);
+  assert.match(prompt, /checked on Google Maps/);
+  const { resposta } = conferirResposta({
+    kind: 'region',
+    itinerary: [{
+      name: 'Tampere', search: 'Tampere, Finlândia', reason: 'a 1h30 de Helsinque', days: 4,
+      highlights: [
+        { vibe: 'Gastronomia', place: 'Ravintola C', search: 'Ravintola C, Tampere, Finlândia', line: 'cozinha nórdica' },
+        { vibe: 'Praia', place: 'X', search: 'X', line: 'não escolhida' },
+      ],
+    }],
+    extras: [{ name: 'Turku', search: 'Turku, Finlândia', reason: 'a 2h', highlights: [{ vibe: 'Gastronomia', place: 'Y', search: 'Y', line: 'y' }] }],
+  }, { maxCities: 7, vibes: ['Gastronomia'] });
+  assert.deepStrictEqual(resposta.itinerary[0].highlights.map((h) => h.place), ['Ravintola C']);
+  assert.strictEqual(resposta.extras[0].highlights, undefined);
+});

@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { montarPrompt, conferirResposta } = require('./sugerir');
 const { montarPromptPerto, conferirPerto } = require('./perto');
+const { conferirDestaques } = require('./prova');
 // `registra-evento` chega aqui por um passo de cópia no cloudbuild (id
 // `copia-registra-evento`) e, no desenvolvimento local, pelo `pretest`.
 const { registrarEvento, statusDoErro } = require('./registra-evento');
@@ -17,6 +18,10 @@ const MODELO_GEMINI = 'gemini-3.6-flash';
 // Este serviço NÃO fala com o Supabase para trabalhar -- como o
 // classify-conflicts, recebe o pedido, pergunta ao modelo e devolve. O
 // único contato com o banco é o `registra-evento`, por fetch, sem SDK.
+//
+// Desde 21/10 fala com o Google Places, para conferir os lugares que
+// provam cada cidade (`prova.js`). Precisa da GOOGLE_MAPS_KEY, a mesma
+// do generate-trip; sem ela a sugestão sai sem os lugares.
 
 // =================================================================
 // AUTENTICACAO: chamadas vindas do app (usuario logado, real ou anonimo)
@@ -49,6 +54,11 @@ function verifySupabaseAuth(req) {
 // tela.
 // =================================================================
 const TETO_GEMINI_MS = 12000;
+
+// A resposta inteira, com a conferência dos lugares de prova (21/10),
+// sai antes disto. As builds do app de antes de 21/10 esperam 15s; a
+// conferência fica com o que sobrar do Gemini, até 4s.
+const TETO_TOTAL_MS = 14000;
 
 // Tetos da entrada. `days` e `max_cities` vêm do app, mas a URL é
 // pública: um `days` absurdo não pode virar um prompt pedindo 500
@@ -127,10 +137,11 @@ exports.suggestCities = async (req, res) => {
             parts: [{ text: textoDoPedido }],
           }],
           generationConfig: {
-            // A saída cabe folgada em 1k: até 15 cidades com uma linha
-            // cada. O dobro é o cinto e suspensório de sempre, porque é
-            // aqui que o pensamento comeu o JSON da memória.
-            maxOutputTokens: 2048,
+            // Até 15 cidades, cada uma com até 3 lugares de prova (21/10),
+            // passa de 2k. O dobro do que cabe é o cinto e suspensório de
+            // sempre, porque é aqui que o pensamento comeu o JSON da
+            // memória.
+            maxOutputTokens: 4096,
             // Um pouco de variação é bem-vinda -- a mesma Itália não
             // precisa sugerir sempre as mesmas extras --, mas pouca:
             // o roteiro tem que ser o óbvio bom, não o exótico.
@@ -190,7 +201,7 @@ exports.suggestCities = async (req, res) => {
       return res.status(200).json(conferidoPerto.resposta);
     }
 
-    const conferido = conferirResposta(JSON.parse(limpo), { maxCities });
+    const conferido = conferirResposta(JSON.parse(limpo), { maxCities, vibes });
     if (!conferido) {
       throw new Error('Resposta sem nenhuma cidade utilizável.');
     }
@@ -198,14 +209,26 @@ exports.suggestCities = async (req, res) => {
     if (descartados.length) {
       console.warn(`[Cidades] Descartados: ${descartados.join(' | ')}`);
     }
+    // O Gemini já respondeu: o alarme dele não pode cortar o Places.
+    clearTimeout(alarme);
+    const { consultas, recusados } = await conferirDestaques(
+      sugestao,
+      process.env.GOOGLE_MAPS_KEY,
+      { prazoMs: TETO_TOTAL_MS - (Date.now() - inicio) },
+    );
+    if (!process.env.GOOGLE_MAPS_KEY) {
+      console.warn('[Cidades] GOOGLE_MAPS_KEY ausente: a sugestão sai sem os lugares de prova.');
+    }
 
     registrarEvento({
       tipo: 'sugestao_cidades',
       userId: usuario?.sub,
       modelo: MODELO_GEMINI,
       uso: usoDoGemini,
+      chamadasPlaces: consultas,
       duracaoMs: Date.now() - inicio,
       meta: {
+        destaques_recusados: recusados,
         kind: sugestao.kind,
         dias: days,
         roteiro: sugestao.itinerary.length,
