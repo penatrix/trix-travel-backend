@@ -18,6 +18,8 @@
 #   3. Variáveis de ambiente:
 #        SUPABASE_JWT_SECRET        para validar o token do app
 #        GEMINI_API_KEY             para a chamada ao Flash
+#        GOOGLE_MAPS_KEY            para conferir os lugares de prova
+#                                   (21/10); a mesma do generate-trip
 #        SUPABASE_URL e
 #        SUPABASE_SERVICE_ROLE_KEY  só para o `registra-evento` gravar a
 #                                   linha de custo; sem elas o serviço
@@ -71,9 +73,10 @@ steps:
       - ${_SERVICE_NAME}
       - --image=gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA
       - --region=${_REGION}
-      # O handler corta o Gemini em 12s. Este teto precisa ser MAIOR, senão
+      # O handler corta o Gemini em 12s, e a conferência dos lugares no
+      # Places (21/10) soma até 4s. Este teto precisa ser MAIOR, senão
       # quem corta é a plataforma, sem log e sem resposta.
-      - --timeout=30
+      - --timeout=40
 
 images:
   - gcr.io/$PROJECT_ID/trix-suggest-cities:$COMMIT_SHA

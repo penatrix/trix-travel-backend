@@ -25,6 +25,8 @@
 // cidade que não vai caber.
 // =====================================================================
 
+const { limparDestaques, MAX_DESTAQUES } = require('./prova');
+
 const MAX_EXTRAS = 4;
 
 /// Monta o prompt.
@@ -55,6 +57,7 @@ TASK:
    - If it is a CITY: return exactly that one city.
    - Otherwise: return between 1 and ${maxCities} cities inside that place, best first, chosen for the vibes and for a sensible route. "days" is how many of the ${days} days each city deserves; it is a weight, the app rebalances it.
 3. "extras": up to ${MAX_EXTRAS} OTHER cities worth adding, near the itinerary cities, reachable in a few hours by land. Never repeat an itinerary city.
+4. "highlights", for each ITINERARY city only: up to ${MAX_DESTAQUES} items, at most one per traveler vibe, each proving the city fits that vibe with ONE real, specific place there. ${vibes.length ? '' : 'No vibes were given: return an empty "highlights" list.'}
 
 RULES:
 - Real, existing cities only. Never invent a place. Never return coordinates.
@@ -62,11 +65,12 @@ RULES:
 - "name", "search" and "reason" are in ${idioma}.
 - "reason" is ONE concrete line, max 12 words: distance or travel time from an itinerary city plus why it fits the vibes. Example: "a 2h de trem de Berlim, pelo vale do Elba". No hype words, no emojis.
 - Interpret vibes literally.
+- "highlights": "vibe" is copied EXACTLY from TRAVELER VIBES. "place" is the real name of a long-established, well-known place in that city (restaurant, bar, museum, market, beach, trail, winery...) that you are certain exists and is open today; if unsure, leave that vibe out. "search" is "Place, City, Country" for a maps search. "line" is ONE concrete line, max 10 words, in ${idioma}, saying what the place is (e.g. "${lang === 'en' ? 'Nordic tasting menu with local produce' : 'menu degustação nórdico com produto local'}"). Never a generic place ("a local bar"). Every place will be checked on Google Maps.
 
 Your response MUST be EXCLUSIVELY a raw JSON object matching this schema exactly:
 {
   "kind": "city" | "region",
-  "itinerary": [ { "name": "...", "search": "City, Country", "reason": "...", "days": 3 } ],
+  "itinerary": [ { "name": "...", "search": "City, Country", "reason": "...", "days": 3, "highlights": [ { "vibe": "...", "place": "...", "search": "Place, City, Country", "line": "..." } ] } ],
   "extras": [ { "name": "...", "search": "City, Country", "reason": "..." } ]
 }`;
 }
@@ -81,14 +85,14 @@ Your response MUST be EXCLUSIVELY a raw JSON object matching this schema exactly
 ///
 /// Devolve `null` quando não sobra roteiro nenhum: aí o app segue com o
 /// destino como veio, que é melhor do que uma lista inventada às pressas.
-function conferirResposta(bruto, { maxCities }) {
+function conferirResposta(bruto, { maxCities, vibes = [] }) {
   if (!bruto || typeof bruto !== 'object') return null;
 
   const kind = String(bruto.kind ?? '').trim().toLowerCase() === 'city' ? 'city' : 'region';
   const vistos = new Set();
   const descartados = [];
 
-  const limpar = (c, comDias) => {
+  const limpar = (c, doRoteiro) => {
     const name = String(c?.name ?? '').trim();
     const reason = String(c?.reason ?? '').trim().slice(0, 140);
     if (!name || !reason) {
@@ -103,9 +107,12 @@ function conferirResposta(bruto, { maxCities }) {
     vistos.add(chave);
     const search = String(c?.search ?? '').trim() || name;
     const saida = { name, search, reason };
-    if (comDias) {
+    if (doRoteiro) {
       const d = Math.round(Number(c?.days));
       if (Number.isFinite(d) && d > 0) saida.days = d;
+      // Ainda sem conferir: quem confere no Google é o `prova.js`, e o
+      // que não passar sai antes de a resposta ir ao app.
+      saida.highlights = limparDestaques(c?.highlights, vibes);
     }
     return saida;
   };
