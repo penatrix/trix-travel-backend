@@ -26,7 +26,7 @@ const casos = require('./prompt-da-geracao.casos.json');
 test('o prompt é o dos casos, que o app confere contra o Dart', () => {
   assert.ok(casos.length >= 9);
   for (const c of casos) {
-    assert.strictEqual(montarPromptDaGeracao(c.linha, c.dna), c.esperado, c.nome);
+    assert.strictEqual(montarPromptDaGeracao(c.linha, c.dna, { hoje: '2026-10-26' }), c.esperado, c.nome);
   }
 });
 

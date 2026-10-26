@@ -100,7 +100,7 @@ test('viajantes inválido conta como um', () => {
 test('o prompt pede o objeto só quando há origem', () => {
   const com = montarPromptDaGeracao(casos[0].linha);
   assert.match(com, /You MUST include an "origin_transfer" object/);
-  assert.match(com, /"per_person_brl": "integer: the round trip for ONE traveler"/);
+  assert.match(com, /"per_person_brl": "integer: the round trip for ONE traveler, typical price"/);
   assert.match(com, /bus or car when the road trip takes about 6 hours or less each way/);
   assert.match(com, /set this to its "per_person_brl" multiplied by 2\./);
   assert.doesNotMatch(com, /round-trip airfare/, 'a regra de sempre voo voltou');
@@ -119,4 +119,34 @@ test('o handler normaliza antes de validar lugares, e registra o meio', () => {
   assert.ok(normaliza < valida);
   assert.ok(normaliza > fonte.indexOf('JSON.parse(cleanText)'));
   assert.match(fonte, /passagem: passagem\?\.modo \?\? null/);
+});
+
+test('a faixa por pessoa fica quando contém o típico, e sai quando não', () => {
+  const r = roteiro({ mode: 'flight', per_person_brl: 5000, per_person_min_brl: '4.200', per_person_max_brl: 5800 });
+  normalizarPassagem(r, 2, { hoje: '2026-10-26' });
+  assert.strictEqual(r.origin_transfer.per_person_min_brl, 4200);
+  assert.strictEqual(r.origin_transfer.per_person_max_brl, 5800);
+  assert.strictEqual(r.origin_transfer.priced_on, '2026-10-26');
+  assert.strictEqual(r.cost_breakdown.flights, 10000);
+
+  const fora = roteiro({ mode: 'flight', per_person_brl: 5000, per_person_min_brl: 5200, per_person_max_brl: 5800 });
+  normalizarPassagem(fora, 1);
+  assert.strictEqual(fora.origin_transfer.per_person_min_brl, undefined);
+  assert.strictEqual(fora.origin_transfer.per_person_max_brl, undefined);
+  assert.strictEqual(fora.origin_transfer.priced_on, undefined);
+});
+
+test('o prompt dá o dia da compra e pede a faixa (26/10)', () => {
+  const p = montarPromptDaGeracao(casos[0].linha, null, { hoje: '2026-07-15' });
+  assert.match(p, /Price it as if bought TODAY, 2026-07-15, for the travel dates above\./);
+  assert.match(p, /"per_person_min_brl" and "per_person_max_brl"/);
+  const provisoria = montarPromptDaGeracao({ ...casos[0].linha, is_date_set: false }, null, { hoje: '2026-07-15' });
+  assert.match(provisoria, /\(a placeholder: price the season they fall in\)/);
+  const sem = montarPromptDaGeracao({ ...casos[0].linha, origin_city: null }, null, { hoje: '2026-07-15' });
+  assert.doesNotMatch(sem, /Price it as if bought TODAY/);
+});
+
+test('o handler passa o dia de hoje para a passagem', () => {
+  const fonte = fs.readFileSync(path.join(__dirname, 'index.js'), 'utf8');
+  assert.match(fonte, /normalizarPassagem\(tripJsonObject, Number\(tripAtual\?\.travelers_count\), \{ hoje: hojeEmSaoPaulo\(\) \}\)/);
 });
