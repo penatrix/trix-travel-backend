@@ -37,9 +37,16 @@ function inteiroPositivo(valor) {
 ///
 /// Devolve `{ modo, de, para }` quando há `origin_transfer`, e `null`
 /// quando não há -- é o que o handler escreve no log.
-function normalizarPassagem(roteiro, viajantes) {
+function normalizarPassagem(roteiro, viajantes, opcoes = {}) {
   const origem = roteiro?.origin_transfer;
   if (!origem || typeof origem !== 'object' || Array.isArray(origem)) return null;
+
+  // O dia da compra que o preço supõe (26/10): a tela diz "comprando em
+  // 26/10", porque a mesma passagem custa outra coisa meses antes. Quem
+  // escreve é o código, não o modelo.
+  if (typeof opcoes.hoje === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(opcoes.hoje)) {
+    origem.priced_on = opcoes.hoje;
+  }
 
   // Meio fora da lista sai do JSON: a tela traduz o valor, e texto solto
   // apareceria como veio.
@@ -55,6 +62,19 @@ function normalizarPassagem(roteiro, viajantes) {
   const bd = roteiro.cost_breakdown;
   if (porPessoa == null || !bd || typeof bd !== 'object' || Array.isArray(bd)) {
     return { modo: origem.mode ?? null, de: null, para: null };
+  }
+
+  // A faixa por pessoa (26/10). Só fica se fizer sentido em volta do
+  // valor típico: faixa que não contém o número somado confundiria mais
+  // do que ajuda, e a tela cai no valor só.
+  const min = inteiroPositivo(origem.per_person_min_brl);
+  const max = inteiroPositivo(origem.per_person_max_brl);
+  if (min != null && max != null && min <= porPessoa && porPessoa <= max && min < max) {
+    origem.per_person_min_brl = min;
+    origem.per_person_max_brl = max;
+  } else {
+    delete origem.per_person_min_brl;
+    delete origem.per_person_max_brl;
   }
 
   const antes = Number(bd.flights);

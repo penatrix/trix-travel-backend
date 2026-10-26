@@ -1,7 +1,7 @@
 const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
-const { montarPromptDaGeracao } = require('./prompt-da-geracao');
+const { montarPromptDaGeracao, hojeEmSaoPaulo } = require('./prompt-da-geracao');
 const { normalizarPassagem } = require('./passagem-de-origem');
 const {
   registrarEvento,
@@ -248,7 +248,7 @@ async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
   // pessoa e o meio (`origin_transfer`); a multiplicação é daqui, porque
   // a dele não acompanhava o número de viajantes. Antes da validação de
   // lugares, que também ajusta o total pela diferença.
-  ctx.passagem = normalizarPassagem(tripJsonObject, Number(tripAtual?.travelers_count));
+  ctx.passagem = normalizarPassagem(tripJsonObject, Number(tripAtual?.travelers_count), { hoje: hojeEmSaoPaulo() });
   if (ctx.passagem) {
     console.log(
       `[Passagem] Trip ${tripId}: ${ctx.passagem.modo ?? 'meio inválido'}, ` +

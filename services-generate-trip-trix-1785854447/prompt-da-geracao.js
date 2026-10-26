@@ -129,8 +129,16 @@ const PALAVRAS_PROIBIDAS = [
   'dream destination',
 ].map((p) => `"${p}"`).join(', ');
 
-function montarPromptDaGeracao(linha, travelDna) {
+// O dia de hoje em São Paulo, 'YYYY-MM-DD'. É a data da compra da
+// passagem: o mesmo voo de novembro custa uma coisa comprado em julho e
+// outra comprado em outubro (Paulo, 26/10).
+function hojeEmSaoPaulo() {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo' }).format(new Date());
+}
+
+function montarPromptDaGeracao(linha, travelDna, opcoes = {}) {
   const l = linha || {};
+  const hoje = texto(opcoes.hoje) !== '' ? texto(opcoes.hoje) : hojeEmSaoPaulo();
   const isPt = l.user_language === 'pt';
   const targetLanguage = isPt ? 'PORTUGUESE (pt-BR)' : 'ENGLISH';
   const periodValues = isPt
@@ -265,14 +273,17 @@ function montarPromptDaGeracao(linha, travelDna) {
   // Sem origem não há o que pedir: o `flights` é 0 e o objeto não existe.
   const regraOrigem = origemLimpa === ''
     ? ''
-    : `  - You MUST include an "origin_transfer" object at the root: "mode" is EXACTLY one of flight, train, bus, car, ferry (in English), and "per_person_brl" is the integer round-trip cost for ONE traveler, in BRL.
+    : `  - You MUST include an "origin_transfer" object at the root: "mode" is EXACTLY one of flight, train, bus, car, ferry (in English), and "per_person_brl" is the integer round-trip cost for ONE traveler, in BRL: the typical price, the one that goes into the total. "per_person_min_brl" and "per_person_max_brl" are the realistic range for that same round trip (a cheap fare and an expensive but common one), integers in BRL, with min <= per_person_brl <= max.
+  - Price it as if bought TODAY, ${hoje}, for the travel dates above${datasConfirmadas ? '' : ' (a placeholder: price the season they fall in)'}. The time between purchase and departure changes the fare: close to departure it costs more, and high season (December and January, July, Carnival, the destination's holidays) costs more.
 `;
   const schemaOrigem = origemLimpa === ''
     ? ''
     : `
     "origin_transfer": {
       "mode": "flight, train, bus, car or ferry",
-      "per_person_brl": "integer: the round trip for ONE traveler"
+      "per_person_brl": "integer: the round trip for ONE traveler, typical price",
+      "per_person_min_brl": "integer: the low end of the range",
+      "per_person_max_brl": "integer: the high end of the range"
     },`;
   const trasladoBlock = `  TRAVEL BETWEEN CITIES (an itinerary that teleports the traveler is not real):
   - Every destination AFTER the first MUST carry an "arrival_transfer" object: how the group gets there from the previous destination. The first destination has none.
@@ -444,4 +455,4 @@ ${backupBlock}
   }`;
 }
 
-module.exports = { montarPromptDaGeracao, PALAVRAS_PROIBIDAS, ritmoDe, dietaryToDb, diasEntre, companhiaDoPerfil };
+module.exports = { montarPromptDaGeracao, hojeEmSaoPaulo, PALAVRAS_PROIBIDAS, ritmoDe, dietaryToDb, diasEntre, companhiaDoPerfil };

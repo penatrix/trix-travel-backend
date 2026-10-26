@@ -12,6 +12,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { montarPromptDaGeracao } = require('./prompt-da-geracao');
 
+// O dia da compra fixo: sem ele o prompt mudaria a cada dia.
+const HOJE = '2026-10-26';
+
 const base = {
   start_date: '2026-12-01',
   end_date: '2026-12-09',
@@ -56,7 +59,7 @@ const casos = [
     linha: { ...base, planned_destinations: [{ destination: 'Lisboa, Portugal', days: 0 }, { destination: 'Porto, Portugal', days: 4 }] }, dna: null },
 ];
 
-const saida = casos.map((c) => ({ ...c, esperado: montarPromptDaGeracao(c.linha, c.dna) }));
+const saida = casos.map((c) => ({ ...c, esperado: montarPromptDaGeracao(c.linha, c.dna, { hoje: HOJE }) }));
 fs.writeFileSync(
   path.join(__dirname, 'prompt-da-geracao.casos.json'),
   JSON.stringify(saida, null, 2) + '\n',
