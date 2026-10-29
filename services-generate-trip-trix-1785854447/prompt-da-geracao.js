@@ -106,13 +106,17 @@ function listaDeTexto(v) {
 // "Com quem você costuma viajar" (Perfil do app, 09/10). O app grava a
 // chave em inglês dentro do `travel_dna.companions`; aqui ela vira a frase
 // que o modelo lê. Pet pede o explícito: hospedagem e lugares que aceitam
-// animal, que é o que a vibe "Pet friendly" pedia antes de sair.
+// animal, que é o que a vibe "Pet friendly" pedia antes de sair. Desde
+// 29/10 diz também o que evitar (alta gastronomia, lugar fechado que
+// costuma barrar animal): só "pet-friendly" deixou passar restaurante que
+// não aceita. O modelo não sabe ao certo; o aviso do cartão é do código
+// (`aviso-de-pet.js`).
 const COMPANHIA = {
   Solo: 'alone',
   Couple: 'as a couple',
   Kids: 'with children',
   Friends: 'with friends',
-  Pet: 'with a pet (pet-friendly lodging and places only)',
+  Pet: 'with a pet (choose only lodging and places known to allow pets; prefer outdoor terraces, parks and casual spots; avoid fine dining and indoor places that usually ban animals)',
 };
 function companhiaDoPerfil(lista) {
   return listaDeTexto(lista).map((c) => COMPANHIA[c]).filter(Boolean);
