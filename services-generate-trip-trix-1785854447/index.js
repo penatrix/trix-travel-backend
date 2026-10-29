@@ -2,6 +2,7 @@ const { createClient } = require('@supabase/supabase-js');
 const jwt = require('jsonwebtoken');
 const { validarEConsertarRoteiro } = require('./validar-lugares');
 const { montarPromptDaGeracao, hojeEmSaoPaulo } = require('./prompt-da-geracao');
+const { temPet, marcarAvisoDePet } = require('./aviso-de-pet');
 const { normalizarPassagem } = require('./passagem-de-origem');
 const {
   registrarEvento,
@@ -300,6 +301,15 @@ async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
   // lugar nenhum a não ser na fatura, que não diz qual roteiro gastou.
   ctx.chamadasPlaces = resumoLugares.chamadas_places;
 
+  // 2.6. Viagem com pet (29/10): o Google não diz, na busca, se o lugar
+  // aceita animal. Restaurante, café, bar e museu ganham a linha
+  // "confirme antes" na dica do cartão (`aviso-de-pet.js`). Depois da
+  // validação, porque é ela que grava o tipo do lugar.
+  if (ctx.comPet) {
+    const marcados = marcarAvisoDePet(tripJsonObject, { en: tripAtual?.user_language !== 'pt' });
+    console.log(`[Pet] Trip ${tripId}: ${marcados} lugar(es) com aviso.`);
+  }
+
   return { tripJsonObject, tokenCount };
 }
 
@@ -348,8 +358,12 @@ async function gerarAcrescimo(tripAtual, linhaNova, plano, dna, tripId, ctx) {
   );
   ctx.chamadasPlaces = resumoLugares.chamadas_places;
 
+  const final = aplicarAcrescimo(tripAtual.itinerary_json, plano, resposta);
+  // Com pet, o aviso também nos lugares novos (2.6 do `gerarEValidar`).
+  if (ctx.comPet) marcarAvisoDePet(final, { en: tripAtual?.user_language !== 'pt' });
+
   return {
-    tripJsonObject: aplicarAcrescimo(tripAtual.itinerary_json, plano, resposta),
+    tripJsonObject: final,
     tokenCount,
     repeticao,
   };
@@ -419,6 +433,7 @@ async function refazerRoteiro(tripAtual, res) {
       .eq('id', tripAtual.user_id)
       .maybeSingle();
     if (donoError) throw new Error(`Falha ao ler o perfil do dono: ${donoError.message}`);
+    geracao.comPet = temPet(dono?.travel_dna);
     // Só acrescenta? Então só as peças novas são escritas (13/10).
     const plano = planoDoAcrescimo(tripAtual.itinerary_json, tripAtual.origin_city, pedido);
 
@@ -704,6 +719,7 @@ exports.generateTrip = async (req, res) => {
       && tripAtual.prompt_payload.trim() !== '';
     origemDoPrompt = legado ? 'legado' : 'backend';
     let promptText = tripAtual.prompt_payload;
+    let comPet = false;
     if (!legado) {
       // O mesmo `travel_dna` que o app lia do perfil de quem gera. Sem
       // linha em `users` (sessão anônima recém-criada), segue sem perfil,
@@ -717,6 +733,7 @@ exports.generateTrip = async (req, res) => {
         throw new Error(`Falha ao ler o perfil do dono da trip ${tripRecord.id}: ${donoError.message}`);
       }
       promptText = montarPromptDaGeracao(tripAtual, dono?.travel_dna ?? null);
+      comPet = temPet(dono?.travel_dna);
     }
 
     // =================================================================
@@ -762,7 +779,7 @@ exports.generateTrip = async (req, res) => {
     // e o crédito foi embora com ela.
     cotaConsumida = true;
 
-    const geracao = { usoDoGemini: null, passagem: null, chamadasPlaces: null };
+    const geracao = { usoDoGemini: null, passagem: null, chamadasPlaces: null, comPet };
     let resultado;
     try {
       resultado = await gerarEValidar(tripAtual, promptText, tripId, geracao);

@@ -14,7 +14,7 @@ const linha = {
 test('vira frase, e ignora o que o app não grava', () => {
   assert.deepEqual(companhiaDoPerfil(['Couple', 'Pet', 'Alien', 3]), [
     'as a couple',
-    'with a pet (pet-friendly lodging and places only)',
+    'with a pet (choose only lodging and places known to allow pets; prefer outdoor terraces, parks and casual spots; avoid fine dining and indoor places that usually ban animals)',
   ]);
   assert.deepEqual(companhiaDoPerfil(undefined), []);
 });
