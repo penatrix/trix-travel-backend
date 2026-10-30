@@ -145,3 +145,12 @@ cache a novas chamadas de API. Evite verbosidade no prompt.
   chamados pelo app com o JWT do Supabase no header `Authorization`.
   `searchPlaces` aceita chamadas sem token (usado no funil pré-cadastro),
   mas valida quando um token vem presente.
+- **`services-avisos` manda as notificações que não são da geração**
+  (30/10, `enviarAvisos`): "entrou no seu roteiro", chamado pelo gatilho
+  `trip_members_avisa_entrada`, e a véspera da viagem, chamada pelo
+  pg_cron às 18h de São Paulo (`scripts/p5.9` do app). Pronto, falhou e
+  refeito continuam no `aviso-push.js` do generate-trip, na hora em que
+  a geração termina. Cada aviso passa antes por `avisos_enviados`, com
+  chave única por pessoa: gatilho repetido não manda duas vezes.
+  Campanha não passa por serviço nenhum: vai pelo painel do Firebase,
+  para o tópico `novidades`.

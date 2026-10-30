@@ -1,0 +1,74 @@
+# Constrói E implanta.
+#
+# Mesmo formato das outras pastas -- o `dir:` no passo de build e o
+# GOOGLE_FUNCTION_TARGET são obrigatórios pelos mesmos motivos descritos
+# no cloudbuild do classify-conflicts.
+#
+# Sem passo de cópia: este serviço não chama o Gemini.
+#
+# =====================================================================
+# ATENÇÃO, PRIMEIRO DEPLOY (serviço novo, 30/10)
+#
+# O passo de deploy usa `services update`, que FALHA se o serviço não
+# existir com este nome e região -- de propósito. Uma vez só, à mão:
+#
+#   1. Criar o serviço `avisos` no Cloud Run, em europe-west1, com
+#      acesso público (quem chama é o banco, sem conta do Google; a porta
+#      é o cabeçalho x-webhook-secret).
+#   2. A conta de serviço dele precisa do papel "Firebase Cloud Messaging
+#      API Admin", como a do generate-trip (se for a mesma, já tem).
+#   3. Criar o gatilho do Cloud Build para esta pasta, como os outros.
+#   4. Variáveis de ambiente, as duas últimas PELO SECRET MANAGER
+#      (variável a partir de segredo), nunca coladas como texto:
+#        SUPABASE_URL
+#        SUPABASE_SERVICE_ROLE_KEY
+#        AVISOS_WEBHOOK_SECRET   um texto aleatório novo; o mesmo vai
+#                                no gatilho e na rodada do scripts/p5.9
+#                                do app
+#   5. A parte 2 do scripts/p5.9 do app, no SQL Editor, com a URL do
+#      serviço e o segredo.
+#
+# Sem uma das variáveis o serviço responde 500 e o log diz qual falta.
+# =====================================================================
+
+substitutions:
+  _FUNCTION_TARGET: enviarAvisos
+  _SERVICE_NAME: avisos
+  _REGION: europe-west1
+
+steps:
+  - id: build
+    name: gcr.io/k8s-skaffold/pack
+    dir: services-avisos
+    entrypoint: pack
+    args:
+      - build
+      - gcr.io/$PROJECT_ID/trix-avisos:$COMMIT_SHA
+      - --builder=gcr.io/buildpacks/builder
+      - --env=GOOGLE_FUNCTION_TARGET=${_FUNCTION_TARGET}
+      - --path=.
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - gcr.io/$PROJECT_ID/trix-avisos:$COMMIT_SHA
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=gcr.io/$PROJECT_ID/trix-avisos:$COMMIT_SHA
+      - --region=${_REGION}
+      # A véspera percorre os roteiros do dia seguinte, um a um.
+      - --timeout=60
+
+images:
+  - gcr.io/$PROJECT_ID/trix-avisos:$COMMIT_SHA
+
+options:
+  logging: CLOUD_LOGGING_ONLY
