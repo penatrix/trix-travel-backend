@@ -4,6 +4,7 @@ const { validarEConsertarRoteiro } = require('./validar-lugares');
 const { montarPromptDaGeracao, hojeEmSaoPaulo } = require('./prompt-da-geracao');
 const { temPet, marcarAvisoDePet } = require('./aviso-de-pet');
 const { normalizarPassagem } = require('./passagem-de-origem');
+const { corrigirDiariaDaEstadia } = require('./diaria-da-estadia');
 const {
   registrarEvento,
   statusDoErro,
@@ -255,6 +256,14 @@ async function gerarEValidar(tripAtual, promptText, tripId, ctx) {
       `[Passagem] Trip ${tripId}: ${ctx.passagem.modo ?? 'meio inválido'}, ` +
       `${ctx.passagem.de ?? '-'} -> ${ctx.passagem.para ?? 'sem valor por pessoa'}.`,
     );
+  }
+
+  // A diária que veio com o valor da estadia inteira (relato de 30/10):
+  // ver `diaria-da-estadia.js`. Antes da validação, que pode trocar o
+  // hotel e mexer no total.
+  const diaria = corrigirDiariaDaEstadia(tripJsonObject);
+  if (diaria) {
+    console.warn(`[Diária] Trip ${tripId}: estadia na diária, ${diaria.de.join('/')} -> ${diaria.para.join('/')}.`);
   }
 
   // 2.5. Validação de status dos lugares, ANTES de virar 'ready'.

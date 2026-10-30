@@ -334,7 +334,7 @@ ${densityBlock}
   - For logistics: Don't just say "Visit the Christ the Redeemer". Tell the user HOW: "Buy tickets online in advance via the official Trem do Corcovado website. Take an Uber early in the morning to avoid crowds."
   - Provide specific cost estimates for EVERY single activity, meal, and accommodation in BRL.
   - EVERY "cost_estimate" MUST state explicitly whether the amount is per person or the total for the whole group of ${travelers ?? 1}. Never leave this ambiguous. Write the whole value in ${targetLanguage}, following this exact pattern: ${costExample}.
-  - "estimated_cost_per_night" is always the TOTAL nightly rate for the room, never per person, and must carry that marker in ${targetLanguage} too.
+  - "estimated_cost_per_night" is the price of ONE night, never the whole stay in that city. It is always the TOTAL for the room, never per person, and must carry that marker in ${targetLanguage} too.
   - For EVERY activity and backup, set "booking_required" (a JSON boolean). It is true ONLY when the place must be booked or ticketed BEFORE arriving: a restaurant that takes table reservations and fills up, a timed-entry museum or monument, a guided tour, a show. It is false when people just walk in, even if there is an entry fee paid at the door. The traveler uses it to track what is already booked, so do not mark everything as true.
 ${custoBlock}
 ${trasladoBlock}
