@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const foto = require('./foto');
 const ingressos = require('./ingressos');
+const paginas = require('./paginas');
 
 // A foto do destino e do lugar, decidida uma vez e guardada (07/10).
 //
@@ -57,6 +58,8 @@ const MAX_DESTINOS = 20;
 const MAX_LUGARES = 30;
 // Lugares a conferir na Tiqets (05/11): os que pedem reserva num roteiro.
 const MAX_INGRESSOS = 30;
+// Páginas de parceiro a conferir (05/11): eSIM do país, guarda-volumes da cidade.
+const MAX_PAGINAS = 20;
 // Cada pedido à Tiqets (a busca e, se ela levar a uma página, a página).
 const TETO_TIQETS_MS = 6000;
 const MAX_TEXTO = 120;
@@ -77,7 +80,10 @@ function lerPedido(corpo) {
   const pedidosDeIngresso = (Array.isArray(corpo?.ingressos) ? corpo.ingressos : [])
     .slice(0, MAX_INGRESSOS)
     .map((i) => ({ lugar: texto(i?.lugar), cidade: texto(i?.cidade) }));
-  return { destinos, lugares, ingressos: pedidosDeIngresso };
+  const pedidosDePagina = (Array.isArray(corpo?.paginas) ? corpo.paginas : [])
+    .slice(0, MAX_PAGINAS)
+    .map((p) => String(p ?? '').trim().slice(0, 300));
+  return { destinos, lugares, ingressos: pedidosDeIngresso, paginas: pedidosDePagina };
 }
 
 // =================================================================
@@ -186,6 +192,62 @@ async function resolverIngressos(pedidos, prazo) {
     return promessa;
   };
   return emParalelo(pedidos.map((p) => () => resolver(p)), PARALELO);
+}
+
+async function lerPaginas(urls) {
+  const unicas = [...new Set(urls)];
+  if (!unicas.length) return new Map();
+  const lista = unicas.map((c) => `"${c.replace(/"/g, '')}"`).join(',');
+  const resposta = await chamarBanco(
+    `paginas_conferidas?select=*&url=in.(${encodeURIComponent(lista)})`,
+  );
+  const linhas = await resposta.json();
+  return new Map(linhas.map((l) => [l.url, l]));
+}
+
+/// Confere as páginas de parceiro, lendo antes o que já foi conferido.
+/// Devolve `true`, `false` ou `null` (não deu para saber) por página.
+async function resolverPaginas(urls, prazo) {
+  if (!urls.length) return [];
+  const aceitas = urls.filter(paginas.enderecoAceito);
+  let existentes;
+  try {
+    existentes = await lerPaginas(aceitas);
+  } catch (erro) {
+    console.error(`[Paginas] Não consegui ler paginas_conferidas: ${erro.message}`);
+    return urls.map(() => null);
+  }
+  const emAndamento = new Map();
+  const resolver = (url) => {
+    if (!paginas.enderecoAceito(url)) return Promise.resolve(false);
+    if (emAndamento.has(url)) return emAndamento.get(url);
+    const promessa = (async () => {
+      const guardada = existentes.get(url);
+      if (paginas.linhaAindaVale(guardada)) return guardada.existe;
+      if (Date.now() > prazo) return null;
+      let existe;
+      try {
+        existe = await paginas.conferirPagina(url, { tetoMs: TETO_TIQETS_MS });
+      } catch (erro) {
+        console.warn(`[Paginas] ${url} não conferida: ${erro.message}`);
+        return null;
+      }
+      console.log(JSON.stringify({ evento: 'pagina_conferida', url, existe }));
+      try {
+        await chamarBanco('paginas_conferidas?on_conflict=url', {
+          method: 'POST',
+          headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+          body: JSON.stringify(paginas.linhaDaPagina(url, existe)),
+        });
+      } catch (erro) {
+        console.warn(`[Paginas] Não consegui gravar ${url}: ${erro.message}`);
+      }
+      return existe;
+    })();
+    emAndamento.set(url, promessa);
+    return promessa;
+  };
+  return emParalelo(urls.map((u) => () => resolver(u)), PARALELO);
 }
 
 async function gravarLinha(linha) {
@@ -353,20 +415,24 @@ exports.fotoDoDestino = async (req, res) => {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
-  const { destinos, lugares, ingressos: pedidosDeIngresso } = lerPedido(req.body);
-  if (!destinos.length && !lugares.length && !pedidosDeIngresso.length) {
-    return res.status(200).json({ destinos: [], lugares: [], ingressos: [] });
+  const { destinos, lugares, ingressos: pedidosDeIngresso, paginas: pedidosDePagina } = lerPedido(req.body);
+  if (!destinos.length && !lugares.length && !pedidosDeIngresso.length && !pedidosDePagina.length) {
+    return res.status(200).json({ destinos: [], lugares: [], ingressos: [], paginas: [] });
   }
 
   const prazo = Date.now() + TETO_TOTAL_MS;
 
   // Só ingressos: o pedido do botão da Tiqets, que não toca nas fotos.
   if (!destinos.length && !lugares.length) {
-    const linhas = await resolverIngressos(pedidosDeIngresso, prazo);
+    const [linhas, existem] = await Promise.all([
+      resolverIngressos(pedidosDeIngresso, prazo),
+      resolverPaginas(pedidosDePagina, prazo),
+    ]);
     return res.status(200).json({
       destinos: [],
       lugares: [],
       ingressos: linhas.map(ingressos.paraOApp),
+      paginas: existem,
     });
   }
   const estado = { semLimite: false };
@@ -388,6 +454,7 @@ exports.fotoDoDestino = async (req, res) => {
       destinos: destinos.map(() => null),
       lugares: lugares.map(() => null),
       ingressos: pedidosDeIngresso.map(() => null),
+      paginas: pedidosDePagina.map(() => null),
     });
   }
 
@@ -396,15 +463,17 @@ exports.fotoDoDestino = async (req, res) => {
     ...destinos.map((d) => () => fotoDoDestino(d, resolver)),
     ...lugares.map((l) => () => fotoDoLugar(l, resolver)),
   ];
-  const [linhas, linhasDeIngresso] = await Promise.all([
+  const [linhas, linhasDeIngresso, existem] = await Promise.all([
     emParalelo(tarefas, PARALELO),
     resolverIngressos(pedidosDeIngresso, prazo),
+    resolverPaginas(pedidosDePagina, prazo),
   ]);
 
   return res.status(200).json({
     destinos: linhas.slice(0, destinos.length).map(foto.paraOApp),
     lugares: linhas.slice(destinos.length).map(foto.paraOApp),
     ingressos: linhasDeIngresso.map(ingressos.paraOApp),
+    paginas: existem,
   });
 };
 

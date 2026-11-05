@@ -163,7 +163,7 @@ test('Tiqets fora do ar: null, e nada gravado para tentar de novo', async () => 
 
 test('pedido só de fotos segue como antes, com a lista de ingressos vazia', async () => {
   const r = await chamar({ destinos: [], lugares: [] });
-  assert.deepStrictEqual(r.corpo, { destinos: [], lugares: [], ingressos: [] });
+  assert.deepStrictEqual(r.corpo, { destinos: [], lugares: [], ingressos: [], paginas: [] });
 });
 
 test('redirecionamento para fora da página de um lugar não vale', () => {
