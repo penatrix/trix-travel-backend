@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const foto = require('./foto');
+const ingressos = require('./ingressos');
 
 // A foto do destino e do lugar, decidida uma vez e guardada (07/10).
 //
@@ -54,6 +55,10 @@ const PARALELO = 4;
 // A URL é pública: listas e textos têm teto.
 const MAX_DESTINOS = 20;
 const MAX_LUGARES = 30;
+// Lugares a conferir na Tiqets (05/11): os que pedem reserva num roteiro.
+const MAX_INGRESSOS = 30;
+// Cada pedido à Tiqets (a busca e, se ela levar a uma página, a página).
+const TETO_TIQETS_MS = 6000;
 const MAX_TEXTO = 120;
 
 const UNSPLASH = 'https://api.unsplash.com';
@@ -69,7 +74,10 @@ function lerPedido(corpo) {
   const lugares = (Array.isArray(corpo?.lugares) ? corpo.lugares : [])
     .slice(0, MAX_LUGARES)
     .map((l) => ({ lugar: texto(l?.lugar), cidade: texto(l?.cidade), pais: texto(l?.pais) }));
-  return { destinos, lugares };
+  const pedidosDeIngresso = (Array.isArray(corpo?.ingressos) ? corpo.ingressos : [])
+    .slice(0, MAX_INGRESSOS)
+    .map((i) => ({ lugar: texto(i?.lugar), cidade: texto(i?.cidade) }));
+  return { destinos, lugares, ingressos: pedidosDeIngresso };
 }
 
 // =================================================================
@@ -112,6 +120,72 @@ async function lerLinhas(chaves) {
   );
   const linhas = await resposta.json();
   return new Map(linhas.map((l) => [l.chave, l]));
+}
+
+async function lerIngressos(chaves) {
+  const unicas = [...new Set(chaves)];
+  if (!unicas.length) return new Map();
+  const lista = unicas.map((c) => `"${c.replace(/"/g, '')}"`).join(',');
+  const resposta = await chamarBanco(
+    `ingressos_conferidos?select=*&chave=in.(${encodeURIComponent(lista)})`,
+  );
+  const linhas = await resposta.json();
+  return new Map(linhas.map((l) => [l.chave, l]));
+}
+
+async function gravarIngresso(linha) {
+  await chamarBanco('ingressos_conferidos?on_conflict=chave', {
+    method: 'POST',
+    headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+    body: JSON.stringify(linha),
+  });
+}
+
+/// Confere os lugares na Tiqets, lendo antes o que já foi conferido.
+/// Sem o banco, nada: conferir sem guardar repetiria a busca a cada
+/// abertura, e o botão pode esperar.
+async function resolverIngressos(pedidos, prazo) {
+  if (!pedidos.length) return [];
+  let existentes;
+  try {
+    existentes = await lerIngressos(pedidos.map(ingressos.chaveDoIngresso));
+  } catch (erro) {
+    console.error(`[Ingressos] Não consegui ler ingressos_conferidos: ${erro.message}`);
+    return pedidos.map(() => null);
+  }
+  const emAndamento = new Map();
+  const resolver = (pedido) => {
+    const chave = ingressos.chaveDoIngresso(pedido);
+    if (emAndamento.has(chave)) return emAndamento.get(chave);
+    const promessa = (async () => {
+      const guardada = existentes.get(chave);
+      if (ingressos.linhaAindaVale(guardada)) return guardada;
+      if (Date.now() > prazo) return null;
+      let achado;
+      try {
+        achado = await ingressos.conferirNaTiqets(pedido, { tetoMs: TETO_TIQETS_MS });
+      } catch (erro) {
+        console.warn(`[Ingressos] "${pedido.lugar}" não conferido: ${erro.message}`);
+        return null;
+      }
+      const linha = ingressos.linhaDoIngresso(pedido, achado);
+      console.log(JSON.stringify({
+        evento: 'ingresso_conferido',
+        lugar: pedido.lugar,
+        cidade: pedido.cidade,
+        url: linha.url,
+      }));
+      try {
+        await gravarIngresso(linha);
+      } catch (erro) {
+        console.warn(`[Ingressos] Não consegui gravar ${chave}: ${erro.message}`);
+      }
+      return linha;
+    })();
+    emAndamento.set(chave, promessa);
+    return promessa;
+  };
+  return emParalelo(pedidos.map((p) => () => resolver(p)), PARALELO);
 }
 
 async function gravarLinha(linha) {
@@ -279,12 +353,22 @@ exports.fotoDoDestino = async (req, res) => {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
   }
 
-  const { destinos, lugares } = lerPedido(req.body);
-  if (!destinos.length && !lugares.length) {
-    return res.status(200).json({ destinos: [], lugares: [] });
+  const { destinos, lugares, ingressos: pedidosDeIngresso } = lerPedido(req.body);
+  if (!destinos.length && !lugares.length && !pedidosDeIngresso.length) {
+    return res.status(200).json({ destinos: [], lugares: [], ingressos: [] });
   }
 
   const prazo = Date.now() + TETO_TOTAL_MS;
+
+  // Só ingressos: o pedido do botão da Tiqets, que não toca nas fotos.
+  if (!destinos.length && !lugares.length) {
+    const linhas = await resolverIngressos(pedidosDeIngresso, prazo);
+    return res.status(200).json({
+      destinos: [],
+      lugares: [],
+      ingressos: linhas.map(ingressos.paraOApp),
+    });
+  }
   const estado = { semLimite: false };
 
   // Uma leitura só para tudo que o pedido pode precisar: os três níveis
@@ -303,6 +387,7 @@ exports.fotoDoDestino = async (req, res) => {
     return res.status(200).json({
       destinos: destinos.map(() => null),
       lugares: lugares.map(() => null),
+      ingressos: pedidosDeIngresso.map(() => null),
     });
   }
 
@@ -311,11 +396,15 @@ exports.fotoDoDestino = async (req, res) => {
     ...destinos.map((d) => () => fotoDoDestino(d, resolver)),
     ...lugares.map((l) => () => fotoDoLugar(l, resolver)),
   ];
-  const linhas = await emParalelo(tarefas, PARALELO);
+  const [linhas, linhasDeIngresso] = await Promise.all([
+    emParalelo(tarefas, PARALELO),
+    resolverIngressos(pedidosDeIngresso, prazo),
+  ]);
 
   return res.status(200).json({
     destinos: linhas.slice(0, destinos.length).map(foto.paraOApp),
     lugares: linhas.slice(destinos.length).map(foto.paraOApp),
+    ingressos: linhasDeIngresso.map(ingressos.paraOApp),
   });
 };
 

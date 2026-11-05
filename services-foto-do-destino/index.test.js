@@ -168,6 +168,6 @@ test('lugar: aceita só se o nome próprio aparece na foto', async () => {
 
 test('pedido vazio responde vazio sem tocar em nada', async () => {
   const r = await chamar({});
-  assert.deepStrictEqual(r.corpo, { destinos: [], lugares: [] });
+  assert.deepStrictEqual(r.corpo, { destinos: [], lugares: [], ingressos: [] });
   assert.deepStrictEqual(buscas, []);
 });
