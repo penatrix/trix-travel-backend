@@ -2,7 +2,8 @@
 //
 // O app monta o endereço de cada parceiro a partir do roteiro: o eSIM do
 // país na Airalo (`/czech-republic-esim`), o guarda-volumes da cidade na
-// Radical Storage (`/storage-list/prague`). O nome em inglês vem do
+// Radical Storage (`/storage-list/prague`), o transfer da cidade na
+// Kiwitaxi (`/en/portugal/lisbon`). O nome em inglês vem do
 // modelo (`country_slug`, `city_slug`), e o da Airalo nem sempre bate
 // ("czechia" no roteiro, "czech-republic" na Airalo). Link para página que
 // não existe é pior que nenhum link, como na Tiqets (`ingressos.js`):
@@ -24,6 +25,9 @@ const DIAS_SEM_PAGINA = 14;
 const PARCEIROS = {
   'www.airalo.com': /^\/[a-z0-9-]+-esim\/?$/,
   'radicalstorage.com': /^\/storage-list\/[a-z0-9-]+\/?$/,
+  // A página de transfer da cidade (`/en/portugal/lisbon`). Cidade sem
+  // página redireciona para `/en/search-results`, que não passa aqui.
+  'kiwitaxi.com': /^\/en\/[a-z0-9-]+\/[a-z0-9-]+\/?$/,
 };
 
 /// O endereço é de um parceiro conhecido, com caminho de página?
@@ -63,9 +67,10 @@ async function conferirPagina(url, { tetoMs = 6000, fetchFn = fetch } = {}) {
       const destino = resposta.headers.get('location');
       if (!destino) return false;
       const proximo = new URL(destino, atual);
-      // Redirecionar para a inicial (ou para fora do parceiro) é o jeito
-      // educado de dizer "não existe".
-      if (proximo.host !== new URL(url).host || proximo.pathname === '/' ) return false;
+      // Redirecionar para a inicial, para uma busca ou para fora do
+      // parceiro é o jeito educado de dizer "não existe": o destino tem de
+      // ser também uma página aceita, do mesmo parceiro.
+      if (proximo.host !== new URL(url).host || !enderecoAceito(proximo.toString())) return false;
       atual = proximo.toString();
       continue;
     }

@@ -46,3 +46,15 @@ test('rede, 429 e 5xx lançam: não se grava "não existe" por um soluço', asyn
   await assert.rejects(paginas.conferirPagina('https://www.airalo.com/japan-esim', { fetchFn: parceiro({ 'https://www.airalo.com/japan-esim': 429 }) }));
   await assert.rejects(paginas.conferirPagina('https://www.airalo.com/japan-esim', { fetchFn: parceiro({ 'https://www.airalo.com/japan-esim': 503 }) }));
 });
+
+test('Kiwitaxi: a página da cidade vale; o redirecionamento para a busca não', async () => {
+  assert.ok(paginas.enderecoAceito('https://kiwitaxi.com/en/portugal/lisbon'));
+  assert.ok(!paginas.enderecoAceito('https://kiwitaxi.com/en/search-results'));
+  const fetchFn = parceiro({
+    'https://kiwitaxi.com/en/portugal/lisbon': 200,
+    'https://kiwitaxi.com/en/czech-republic/prague': 'https://kiwitaxi.com/en/search-results',
+    'https://kiwitaxi.com/en/search-results': 200,
+  });
+  assert.strictEqual(await paginas.conferirPagina('https://kiwitaxi.com/en/portugal/lisbon', { fetchFn }), true);
+  assert.strictEqual(await paginas.conferirPagina('https://kiwitaxi.com/en/czech-republic/prague', { fetchFn }), false);
+});
