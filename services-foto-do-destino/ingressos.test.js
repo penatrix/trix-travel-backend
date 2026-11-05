@@ -19,15 +19,29 @@ const { fotoDoDestino } = require('./index');
 const token = jwt.sign({ role: 'authenticated', sub: 'u1' }, 'segredo');
 
 // Um trecho da página real da Tiqets (Castelo de Praga, 05/11).
-function paginaDe(ingles, nome) {
+function paginaDe(ingles, nome, produtos = []) {
+  const ld = produtos
+    .map((p) => `{"@type": "Product", "location": "Lugar", "name": "${p}", "offers": {}}`)
+    .join(', ');
   return `<script>window.BUILD_VERSION = "v1";
-      window.BOOTSTRAP_DATA = {"city": {"admin_name": "${ingles}", "id": 76528, "in_city": "em ${nome}", "name": "${nome}", "today": "2026-11-05"}, "venue": {}};</script>`;
+      window.BOOTSTRAP_DATA = {"city": {"admin_name": "${ingles}", "id": 76528, "in_city": "em ${nome}", "name": "${nome}", "today": "2026-11-05"}, "venue": {}};</script>
+      <script type="application/ld+json">[${ld}]</script>`;
 }
 
 const LUGARES = {
   'Castelo de Praga': { pagina: '/pt/bilhetes-castelo-de-praga-l144211/', ingles: 'Prague', nome: 'Praga' },
   Rijksmuseum: { pagina: '/pt/bilhetes-rijksmuseum-l127351/', ingles: 'Amsterdam', nome: 'Amsterd\\u00e3' },
   'Museu Nacional': { pagina: '/pt/bilhetes-museu-nacional-de-arte-antiga-l202731/', ingles: 'Lisbon', nome: 'Lisboa' },
+  // Fica em Kilchberg, ao lado de Zurique; a página vende passeios que
+  // citam Zurique.
+  'Lindt Home of Chocolate': {
+    pagina: '/pt/bilhetes-lindt-home-of-chocolate-l193050/',
+    ingles: 'Kilchberg',
+    nome: 'Kilchberg',
+    produtos: ['Lindt Home of Chocolate: bilhete de entrada', 'Zurique: Visita guiada \\u00e0 Cidade Velha + Lindt'],
+  },
+  // A Tiqets só acha pelo nome sem o parêntese.
+  'Palácio Ducal': { pagina: '/pt/bilhetes-palacio-ducal-l143993/', ingles: 'Venice', nome: 'Veneza' },
 };
 
 let banco;
@@ -60,7 +74,7 @@ beforeEach(() => {
         return new Response('', { status: 302, headers: { location: `https://www.tiqets.com${l.pagina}` } });
       }
       const l = Object.values(LUGARES).find((x) => x.pagina === u.pathname);
-      return new Response(paginaDe(l.ingles, l.nome), { status: 200 });
+      return new Response(paginaDe(l.ingles, l.nome, l.produtos), { status: 200 });
     }
     throw new Error(`fetch inesperado: ${url}`);
   };
@@ -102,6 +116,28 @@ test('lugar que a Tiqets não vende (a Villa Müller): sem endereço, e guardado
   const r = await chamar({ ingressos: [{ lugar: 'Villa Müller', cidade: 'Praga' }] });
   assert.deepStrictEqual(r.corpo.ingressos, [null]);
   assert.strictEqual(banco.get('tiqets|villa muller|praga').url, null);
+});
+
+test('lugar na cidade vizinha vale quando um produto da página cita a cidade', async () => {
+  const r = await chamar({ ingressos: [{ lugar: 'Lindt Home of Chocolate', cidade: 'Zurique' }] });
+  assert.deepStrictEqual(r.corpo.ingressos, [
+    { url: 'https://www.tiqets.com/pt/bilhetes-lindt-home-of-chocolate-l193050/' },
+  ]);
+});
+
+test('o nome sem o parêntese também se tenta, com a mesma conferência', async () => {
+  const r = await chamar({ ingressos: [{ lugar: 'Palácio Ducal (Palazzo Ducale)', cidade: 'Veneza' }] });
+  assert.deepStrictEqual(r.corpo.ingressos, [{ url: 'https://www.tiqets.com/pt/bilhetes-palacio-ducal-l143993/' }]);
+  assert.deepStrictEqual(
+    ingressos.nomesATentar('Palácio Ducal (Palazzo Ducale)'),
+    ['Palácio Ducal (Palazzo Ducale)', 'Palácio Ducal', 'Palazzo Ducale'],
+  );
+  assert.deepStrictEqual(ingressos.nomesATentar('Coliseu'), ['Coliseu']);
+});
+
+test('lugar de outra cidade que nenhum produto cita: sem endereço', async () => {
+  const r = await chamar({ ingressos: [{ lugar: 'Castelo de Praga', cidade: 'Viena' }] });
+  assert.deepStrictEqual(r.corpo.ingressos, [null]);
 });
 
 test('a página é de outra cidade: sem endereço', async () => {

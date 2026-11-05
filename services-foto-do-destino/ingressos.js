@@ -14,7 +14,17 @@
 //      responde 200 com uma lista genérica ("Villa Müller");
 //   2. a página do lugar traz a cidade no `BOOTSTRAP_DATA`, em inglês e
 //      em português ("Prague" e "Praga"). Ela tem de ser a do roteiro:
-//      "Museu Nacional" existe em muitas cidades.
+//      "Museu Nacional" existe em muitas cidades. Ou, quando o lugar fica
+//      na vizinha (a Lindt Home of Chocolate é de Kilchberg, ao lado de
+//      Zurique), algum produto vendido na página tem de citar a cidade do
+//      roteiro ("Zurique: Visita guiada à Cidade Velha + ... Lindt").
+//      Medido em 05/11: o Castelo de Praga pedido para Viena e o Museu
+//      Nacional de Arte Antiga pedido para o Porto não passam.
+//
+// O nome que o roteiro escreve nem sempre é o da Tiqets: "Palácio Ducal
+// (Palazzo Ducale)" só cai na página como "Palácio Ducal". Então se
+// tenta o nome inteiro, o nome sem o parêntese e o que está dentro dele,
+// e cada tentativa passa pela mesma conferência.
 //
 // Nada disso é API documentada. Se a Tiqets mudar o site, a conferência
 // volta "não vende" e o botão some: nunca mostra coisa errada.
@@ -73,6 +83,46 @@ function cidadeDaPagina(html) {
   return nome || ingles ? { nome, ingles } : null;
 }
 
+/// Os nomes dos produtos vendidos na página do lugar.
+function produtosDaPagina(html) {
+  const nomes = [];
+  const padroes = [
+    /"@type"\s*:\s*"Product"[^{}]*?"name"\s*:\s*("(?:[^"\\]|\\.)*")/g,
+    /"location"\s*:\s*"(?:[^"\\]|\\.)*"\s*,\s*"name"\s*:\s*("(?:[^"\\]|\\.)*")/g,
+  ];
+  for (const padrao of padroes) {
+    for (const m of (html ?? '').matchAll(padrao)) {
+      try {
+        nomes.push(JSON.parse(m[1]));
+      } catch {
+        // nome com escape que o JSON não lê: fica de fora
+      }
+    }
+  }
+  return nomes;
+}
+
+/// Algum produto da página cita a cidade do roteiro, como palavra?
+function cidadeNosProdutos(cidadeDoRoteiro, html) {
+  const alvo = normalizar(cidadeDoRoteiro);
+  if (!alvo) return false;
+  return produtosDaPagina(html).some((nome) => ` ${normalizar(nome)} `.includes(` ${alvo} `));
+}
+
+/// Os nomes a tentar: o inteiro, sem o parêntese, e o de dentro dele.
+function nomesATentar(lugar) {
+  const inteiro = String(lugar ?? '').trim();
+  const dentro = /\(([^)]+)\)/.exec(inteiro)?.[1]?.trim() ?? '';
+  const fora = inteiro.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
+  const vistos = new Set();
+  return [inteiro, fora, dentro].filter((n) => {
+    const k = normalizar(n);
+    if (!k || vistos.has(k)) return false;
+    vistos.add(k);
+    return true;
+  });
+}
+
 /// A cidade do roteiro é a da página? "Praga" bate com "Praga" ou
 /// "Prague"; "Lisboa" com "Lisboa" ou "Lisbon".
 function mesmaCidade(cidadeDoRoteiro, daPagina) {
@@ -98,13 +148,9 @@ async function buscarComTeto(url, opcoes, tetoMs, fetchFn) {
   }
 }
 
-/// Confere um lugar. Devolve `{url, cidade}` quando a Tiqets vende o
-/// lugar naquela cidade, `null` quando não vende, e LANÇA quando não deu
-/// para saber (rede, tempo): falha não se grava, para não esconder o
-/// botão por um mês por causa de um soluço.
-async function conferirNaTiqets({ lugar, cidade }, { tetoMs = 6000, fetchFn = fetch } = {}) {
-  if (!normalizar(lugar) || !normalizar(cidade)) return null;
-  const busca = `${TIQETS}/pt/search?q=${encodeURIComponent(lugar.trim())}`;
+/// Uma tentativa: o nome leva direto à página de um lugar na cidade?
+async function tentarNome(nome, cidade, tetoMs, fetchFn) {
+  const busca = `${TIQETS}/pt/search?q=${encodeURIComponent(nome)}`;
   const resposta = await buscarComTeto(busca, { redirect: 'manual' }, tetoMs, fetchFn);
   if (resposta.status >= 500) throw new Error(`Tiqets respondeu ${resposta.status}.`);
   const destino = resposta.headers.get('location');
@@ -115,9 +161,24 @@ async function conferirNaTiqets({ lugar, cidade }, { tetoMs = 6000, fetchFn = fe
   const pagina = await buscarComTeto(url, {}, tetoMs, fetchFn);
   if (pagina.status >= 500) throw new Error(`Tiqets respondeu ${pagina.status}.`);
   if (!pagina.ok) return null;
-  const daPagina = cidadeDaPagina(await pagina.text());
-  if (!mesmaCidade(cidade, daPagina)) return null;
-  return { url, cidade: daPagina.nome || daPagina.ingles };
+  const html = await pagina.text();
+  const daPagina = cidadeDaPagina(html);
+  if (mesmaCidade(cidade, daPagina)) return { url, cidade: daPagina.nome || daPagina.ingles };
+  if (cidadeNosProdutos(cidade, html)) return { url, cidade: daPagina?.nome || daPagina?.ingles || null };
+  return null;
+}
+
+/// Confere um lugar. Devolve `{url, cidade}` quando a Tiqets vende o
+/// lugar naquela cidade, `null` quando não vende, e LANÇA quando não deu
+/// para saber (rede, tempo): falha não se grava, para não esconder o
+/// botão por um mês por causa de um soluço.
+async function conferirNaTiqets({ lugar, cidade }, { tetoMs = 6000, fetchFn = fetch } = {}) {
+  if (!normalizar(lugar) || !normalizar(cidade)) return null;
+  for (const nome of nomesATentar(lugar)) {
+    const achado = await tentarNome(nome, cidade, tetoMs, fetchFn);
+    if (achado) return achado;
+  }
+  return null;
 }
 
 /// A linha guardada ainda vale?
@@ -150,6 +211,9 @@ module.exports = {
   ehPaginaDeLugar,
   cidadeDaPagina,
   mesmaCidade,
+  produtosDaPagina,
+  cidadeNosProdutos,
+  nomesATentar,
   conferirNaTiqets,
   linhaAindaVale,
   linhaDoIngresso,
