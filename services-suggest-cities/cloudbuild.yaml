@@ -21,9 +21,11 @@
 #        GOOGLE_MAPS_KEY            para conferir os lugares de prova
 #                                   (21/10); a mesma do generate-trip
 #        SUPABASE_URL e
-#        SUPABASE_SERVICE_ROLE_KEY  só para o `registra-evento` gravar a
-#                                   linha de custo; sem elas o serviço
-#                                   funciona e o log avisa
+#        SUPABASE_SERVICE_ROLE_KEY  para o `registra-evento` gravar a
+#                                   linha de custo e, desde 13/11, para o
+#                                   cache do filtro de vibes
+#                                   (`vibes_do_destino`); sem elas o
+#                                   serviço funciona e o log avisa
 #   4. O `check` da coluna `tipo` da tabela `eventos` precisa aceitar
 #      'sugestao_cidades'. Sem isso a sugestão funciona e a linha de
 #      custo volta 400 -- o módulo avisa no log, não derruba nada.

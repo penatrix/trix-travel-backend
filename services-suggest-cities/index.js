@@ -2,6 +2,16 @@ const jwt = require('jsonwebtoken');
 const { montarPrompt, conferirResposta } = require('./sugerir');
 const { montarPromptPerto, conferirPerto } = require('./perto');
 const { conferirDestaques } = require('./prova');
+const {
+  normalizarDestino,
+  lerOpcoes,
+  montarPromptVibes,
+  conferirVibes,
+  respostaDoCache,
+  linhaNovaDoCache,
+  lerCache,
+  gravarCache,
+} = require('./vibes');
 // `registra-evento` chega aqui por um passo de cópia no cloudbuild (id
 // `copia-registra-evento`) e, no desenvolvimento local, pelo `pretest`.
 const { registrarEvento, statusDoErro } = require('./registra-evento');
@@ -22,6 +32,10 @@ const MODELO_GEMINI = 'gemini-3.6-flash';
 // Desde 21/10 fala com o Google Places, para conferir os lugares que
 // provam cada cidade (`prova.js`). Precisa da GOOGLE_MAPS_KEY, a mesma
 // do generate-trip; sem ela a sugestão sai sem os lugares.
+//
+// Desde 13/11 o filtro de vibes (`vibes.js`) lê e grava o seu cache em
+// `vibes_do_destino`, também por fetch e com a service_role. Sem as
+// variáveis, o filtro funciona sem cache: toda chamada vai ao modelo.
 
 // =================================================================
 // AUTENTICACAO: chamadas vindas do app (usuario logado, real ou anonimo)
@@ -68,6 +82,113 @@ const MAX_CIDADES = 15;
 const MAX_VIBES = 10;
 
 // =================================================================
+// O FILTRO DE VIBES PELO DESTINO (13/11, `vibes.js`)
+//
+// Pedido: { modo: 'vibes', destination, lang?, opcoes: [{ chave, nome }] }
+// Resposta: sempre 200 com { fora: [chave, ...] } -- as opções que não
+// cabem no destino. Falha do modelo, do tempo ou do banco devolve
+// { fora: [] }, e o app mostra tudo. Só o destino vazio é 400.
+//
+// Cache primeiro (`vibes_do_destino`, 90 dias); sem ele, o Flash com
+// thinking LOW e teto próprio de 8s: a pessoa está no passo das vibes,
+// e a tela já está desenhada com todas as opções enquanto isto responde.
+// =================================================================
+const TETO_VIBES_MS = 8000;
+
+async function filtrarVibes(corpo, usuario, res) {
+  const inicio = Date.now();
+  const destination = String(corpo.destination ?? '').trim().slice(0, 200);
+  if (!destination) {
+    return res.status(400).json({ error: 'destination é obrigatório.' });
+  }
+  const destino = normalizarDestino(destination);
+  const opcoes = lerOpcoes(corpo.opcoes);
+  const chaves = opcoes.map((o) => o.chave);
+  if (chaves.length === 0) return res.status(200).json({ fora: [] });
+
+  const anterior = await lerCache(destino);
+  const doCache = respostaDoCache(anterior, chaves);
+  if (doCache) {
+    console.log(`[Vibes] "${destino}": cache, ${doCache.length} de ${chaves.length} fora.`);
+    return res.status(200).json({ fora: doCache });
+  }
+
+  let usoDoGemini = null;
+  try {
+    const resposta = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODELO_GEMINI}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: montarPromptVibes({ destination, opcoes }) }] }],
+          generationConfig: {
+            // A saída é uma lista de ids curtos, poucas centenas de
+            // tokens no pior caso das 80 opções. O resto é folga para o
+            // pensamento, que conta dentro deste teto.
+            maxOutputTokens: 2048,
+            // Geografia, não criatividade: o mesmo destino tem que dar o
+            // mesmo filtro.
+            temperature: 0,
+            responseMimeType: 'application/json',
+            // LOW, declarado, como no resto do serviço (CLAUDE.md,
+            // "Regras de IA"): omitir não desliga.
+            thinkingConfig: { thinkingLevel: 'LOW' },
+          },
+        }),
+        signal: AbortSignal.timeout(TETO_VIBES_MS),
+      },
+    );
+    if (!resposta.ok) {
+      const texto = await resposta.text();
+      throw new Error(`Falha Gemini: ${resposta.status} - ${texto.slice(0, 300)}`);
+    }
+    const dados = await resposta.json();
+    usoDoGemini = dados.usageMetadata ?? null;
+    const finishReason = dados.candidates?.[0]?.finishReason;
+    if (finishReason && finishReason !== 'STOP') {
+      throw new Error(`Gemini interrompeu a resposta (finishReason: ${finishReason}).`);
+    }
+    const cru = dados.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof cru !== 'string') throw new Error('Resposta vazia do Gemini.');
+    const limpo = cru.replace(/```json/g, '').replace(/```/g, '').trim();
+    const fora = conferirVibes(JSON.parse(limpo), chaves);
+
+    // Gravar não segura a resposta além do teto do banco, e falhar aqui
+    // não muda o que a pessoa recebe.
+    await gravarCache(linhaNovaDoCache(destino, anterior, chaves, fora));
+
+    registrarEvento({
+      tipo: 'sugestao_cidades',
+      userId: usuario?.sub,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - inicio,
+      meta: { modo: 'vibes', opcoes: chaves.length, fora: fora.length },
+    });
+    console.log(`[Vibes] "${destino}": ${fora.length} de ${chaves.length} fora (${fora.join(', ')}) em ${Date.now() - inicio}ms.`);
+    return res.status(200).json({ fora });
+  } catch (erro) {
+    const abortou = erro.name === 'AbortError' || erro.name === 'TimeoutError';
+    const msg = abortou
+      ? `Gemini nao respondeu em ${Math.round(TETO_VIBES_MS / 1000)}s no filtro de vibes.`
+      : erro.message;
+    registrarEvento({
+      tipo: 'sugestao_cidades',
+      status: statusDoErro(erro),
+      motivo: msg,
+      userId: usuario?.sub,
+      modelo: MODELO_GEMINI,
+      uso: usoDoGemini,
+      duracaoMs: Date.now() - inicio,
+      meta: { modo: 'vibes' },
+    });
+    console.error(`[Vibes] Filtro falhou, o app mostra tudo: ${msg}`);
+    return res.status(200).json({ fora: [] });
+  }
+}
+
+// =================================================================
 // SERVIÇO: SUGERE CIDADES PARA O PASSO 3 DO WIZARD
 // =================================================================
 exports.suggestCities = async (req, res) => {
@@ -82,6 +203,12 @@ exports.suggestCities = async (req, res) => {
   const usuario = verifySupabaseAuth(req);
   if (!usuario) {
     return res.status(401).json({ error: 'Token de autenticação ausente ou inválido.' });
+  }
+
+  // O filtro de vibes tem teto e tratamento de erro próprios: falha ali
+  // é 200 com a lista vazia, não 500.
+  if (req.body?.modo === 'vibes') {
+    return await filtrarVibes(req.body, usuario, res);
   }
 
   const controlador = new AbortController();
