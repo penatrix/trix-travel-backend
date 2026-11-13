@@ -57,6 +57,19 @@ const casos = [
       ] }, dna: null },
   { nome: 'cidade sem dias definidos',
     linha: { ...base, planned_destinations: [{ destination: 'Lisboa, Portugal', days: 0 }, { destination: 'Porto, Portugal', days: 4 }] }, dna: null },
+  // As sub-vibes (13/11, `sub-vibes.js`). O handler resolve as chaves de
+  // `sub_vibes` em `trix_subvibes` e põe o resultado na linha; aqui ele
+  // vem pronto, com as frases do banco em 13/11.
+  { nome: 'sub-vibes de gastronomia e esporte, com a trava do esporte',
+    linha: { ...base, vibe_tags: 'Gastronomy, Sports',
+      sub_vibes: 'comida_de_rua, achados_locais, estadios',
+      sub_vibes_resolvidas: [
+        { vibe_tag: 'Gastronomy', chave: 'comida_de_rua', ai_prompt: 'street food stalls and food markets', ordem: 2 },
+        { vibe_tag: 'Gastronomy', chave: 'achados_locais', ai_prompt: 'little-known places where locals eat, away from the usual tourist lists (still real, established and open)', ordem: 4 },
+        { vibe_tag: 'Sports', chave: 'estadios', ai_prompt: 'stadium visits, stadium tours and club museums; never schedule or promise a specific match, game date or ticket', ordem: 1 },
+      ] }, dna: null },
+  { nome: 'esporte sem sub-vibe: só a trava',
+    linha: { ...base, vibe_tags: 'Sports, Wine' }, dna: null },
 ];
 
 const saida = casos.map((c) => ({ ...c, esperado: montarPromptDaGeracao(c.linha, c.dna, { hoje: HOJE }) }));

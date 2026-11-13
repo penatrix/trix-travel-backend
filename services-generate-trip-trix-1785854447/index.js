@@ -20,6 +20,7 @@ const {
   roteiroDasPecas,
   aplicarAcrescimo,
 } = require('./acrescimo');
+const { resolverSubVibes } = require('./sub-vibes');
 
 // O modelo desta chamada, num lugar só.
 //
@@ -434,7 +435,13 @@ async function refazerRoteiro(tripAtual, res) {
     if (premium !== true) throw new Error('Roteiro sem Premium.');
 
     const novos = parametrosDoRefazer(tripAtual, pedido);
-    const linhaNova = { ...tripAtual, ...novos };
+    // As sub-vibes (13/11) valem no refazer e no acréscimo como na
+    // geração: a `linhaNova` leva as resolvidas para o prompt.
+    const linhaNova = {
+      ...tripAtual,
+      ...novos,
+      sub_vibes_resolvidas: await resolverSubVibes(supabase, tripAtual),
+    };
 
     const { data: dono, error: donoError } = await supabase
       .from('users')
@@ -666,7 +673,7 @@ exports.generateTrip = async (req, res) => {
       'id, user_id, status, prompt_payload, start_date, ' +
       'end_date, travelers_count, pace_level, is_date_set, ' +
       'budget_limit, budget_level, vibe_tags, special_request, ' +
-      'user_language, origin_city, planned_destinations';
+      'user_language, origin_city, planned_destinations, sub_vibes';
     // O refazer (09/10): o pedido do app e quem já começou a atendê-lo.
     const colunasDoRefazer = ', refazer_pedido, refazer_iniciado_em, refeito_em';
     let { data: tripAtual, error: leituraError } = await supabase
@@ -741,6 +748,9 @@ exports.generateTrip = async (req, res) => {
       if (donoError) {
         throw new Error(`Falha ao ler o perfil do dono da trip ${tripRecord.id}: ${donoError.message}`);
       }
+      // As sub-vibes (13/11, `sub-vibes.js`): resolvidas na linha, que é
+      // de onde o prompt as lê. Falha na leitura devolve lista vazia.
+      tripAtual.sub_vibes_resolvidas = await resolverSubVibes(supabase, tripAtual);
       promptText = montarPromptDaGeracao(tripAtual, dono?.travel_dna ?? null);
       comPet = temPet(dono?.travel_dna);
     }

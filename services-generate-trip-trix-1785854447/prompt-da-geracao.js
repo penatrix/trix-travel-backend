@@ -24,8 +24,12 @@
 //   travelers_count, budget_limit (teto do GRUPO), budget_level, pace_level
 //   vibe_tags             as vibes em inglês, juntas por ', '
 //   special_request, user_language, origin_city
+//   sub_vibes_resolvidas  as linhas de `trix_subvibes` das chaves de
+//                         `sub_vibes`, lidas pelo handler (`sub-vibes.js`)
 
 'use strict';
+
+const { linhasDasSubVibes } = require('./sub-vibes');
 
 // O RitmoDaViagem do app (`lib/flutter_flow/ritmo_da_viagem.dart`).
 // O número de paradas é PROMESSA na tela do app ("Duas paradas por dia")
@@ -202,6 +206,13 @@ function montarPromptDaGeracao(linha, travelDna, opcoes = {}) {
 
   // 4. Vibes, já em inglês na coluna.
   const vibesText = texto(l.vibe_tags).trim() !== '' ? texto(l.vibe_tags) : 'None';
+  // 4a. Sub-vibes (13/11, `sub-vibes.js`) e a trava do esporte. As
+  // sub-vibes chegam já resolvidas pelo handler, em
+  // `sub_vibes_resolvidas`. Sem nenhuma das duas, string vazia: o texto
+  // de antes fica idêntico, byte a byte.
+  const vibesExtras = linhasDasSubVibes(l.vibe_tags, l.sub_vibes_resolvidas)
+    .map((linhaExtra) => `\n  ${linhaExtra}`)
+    .join('');
 
   // 4.5. O Travel DNA do dono, literal.
   let travelerProfileText = '';
@@ -321,7 +332,7 @@ ${dateInstruction}
   Travelers: ${travelers ?? 1} people.
   Total Budget: ${budgetText} (Level: ${orDefault(budgetLevel, 'Standard')}).
   Pace: ${orDefault(pace, 'Moderate')}.
-  Main interests: ${vibesText}.
+  Main interests: ${vibesText}.${vibesExtras}
   Special requests: ${orDefault(specialRequest, 'None')}.
   ${travelerProfileText}
   ${gapInstruction}
